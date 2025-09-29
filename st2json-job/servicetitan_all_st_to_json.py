@@ -3,6 +3,8 @@ from requests.auth import HTTPBasicAuth
 import json
 from datetime import datetime
 import os
+import gc
+import psutil
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -18,8 +20,24 @@ ENDPOINTS = [
     ("settings/v2/tenant", "employees"),
     ("marketing/v2/tenant", "campaigns"),
     ("timesheets/v2/tenant", "activities"),
-    ("timesheets/v2/tenant", "timesheets"),
+    ("payroll/v2/tenant", "jobs/timesheets"),    
+    ("sales/v2/tenant", "estimates")
 ]
+#    ("timesheets/v2/tenant", "timesheets"),
+
+# Funciones de monitoreo de memoria
+def log_memory_usage(stage=""):
+    """Log current memory usage"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+    print(f"🧠 Memoria utilizada {stage}: {memory_mb:.2f} MB")
+    return memory_mb
+
+def force_garbage_collection():
+    """Force garbage collection to free memory"""
+    collected = gc.collect()
+    print(f"🗑️ Garbage collection liberó {collected} objetos")
 
 # Clase de autenticación y descarga
 class ServiceTitanAuth:
@@ -55,29 +73,55 @@ class ServiceTitanAuth:
         )
         response.raise_for_status()
         return response.json()['access_token']
-    def get_data(self, api_url_base, api_data):
+    def get_data_streaming(self, api_url_base, api_data, output_file):
+        """Stream data directly to file to avoid memory accumulation"""
         token = self.get_access_token()
         tenant_id = self.credentials['tenant_id']
-        all_data = []
         page = 1
         page_size = 1000
-        while True:
-            url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
-            response = requests.get(
-                url,
-                headers={
-                    'Authorization': f'Bearer {token}',
-                    'ST-App-Id': self.credentials['app_id'],
-                    'ST-App-Key': self.credentials['app_key']
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-            all_data.extend(data.get("data", []))
-            if len(data.get("data", [])) < page_size:
-                break
-            page += 1
-        return all_data
+        total_records = 0
+        
+        # Open file for writing
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write('[\n')
+            first_page = True
+            
+            while True:
+                url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
+                response = requests.get(
+                    url,
+                    headers={
+                        'Authorization': f'Bearer {token}',
+                        'ST-App-Id': self.credentials['app_id'],
+                        'ST-App-Key': self.credentials['app_key']
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+                page_data = data.get("data", [])
+                
+                # Write data directly to file
+                for i, record in enumerate(page_data):
+                    if not first_page or i > 0:
+                        f.write(',\n')
+                    json.dump(record, f, ensure_ascii=False, indent=2)
+                    first_page = False
+                
+                total_records += len(page_data)
+                print(f"📄 Página {page}: {len(page_data)} registros procesados")
+                
+                if len(page_data) < page_size:
+                    break
+                page += 1
+                
+                # Force garbage collection every few pages
+                if page % 5 == 0:
+                    force_garbage_collection()
+            
+            f.write('\n]')
+        
+        print(f"✅ Total de registros procesados: {total_records}")
+        return total_records
 
 def ensure_bucket_exists(project_id, region="US"):
     bucket_name = f"{project_id}_servicetitan"
@@ -108,35 +152,60 @@ def process_company(row):
     tenant_id = row.tenant_id
     app_key = row.app_key
     project_id = row.company_project_id  # Usar directamente el campo project_id
+    
     print(f"\n{'='*80}\n🏢 Procesando compañía: {company_name} (ID: {company_id}) | project_id: {project_id}")
+    log_memory_usage("inicio de compañía")
+    
     # 1. Crear/verificar bucket
     bucket_name = ensure_bucket_exists(project_id)
+    
     # 2. Instanciar cliente ServiceTitan
     st_client = ServiceTitanAuth(app_id, client_id, client_secret, tenant_id, app_key)
-    # 3. Descargar y subir datos de cada endpoint
+    
+    # 3. Descargar y subir datos de cada endpoint usando streaming
     for api_url_base, api_data in ENDPOINTS:
         print(f"\n🔄 Descargando endpoint: {api_data}")
+        log_memory_usage(f"antes de {api_data}")
+        
         try:
-            data = st_client.get_data(api_url_base, api_data)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename_ts = f"servicetitan_{api_data}_{timestamp}.json"
-            filename_alias = f"servicetitan_{api_data}.json"
-            # Guardar localmente ambos archivos
-            with open(filename_ts, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            with open(filename_alias, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            filename_api_data = api_data.replace("/","_") 
+            filename_ts = f"servicetitan_{filename_api_data}_{timestamp}.json"
+            filename_alias = f"servicetitan_{filename_api_data}.json"
+
+            # Usar streaming para evitar acumulación de memoria
+            total_records = st_client.get_data_streaming(api_url_base, api_data, filename_ts)
+            
+            # Copiar archivo para el alias (sin timestamp)
+            import shutil
+            shutil.copy2(filename_ts, filename_alias)
+            
             # Subir ambos archivos al bucket
             upload_to_bucket(bucket_name, project_id, filename_ts, filename_ts)
             upload_to_bucket(bucket_name, project_id, filename_alias, filename_alias)
-            # Borrar archivos locales
+            
+            # Borrar archivos locales inmediatamente
             os.remove(filename_ts)
             os.remove(filename_alias)
-            print(f"✅ Endpoint {api_data} procesado y archivos subidos.")
+            
+            # Forzar garbage collection después de cada endpoint
+            force_garbage_collection()
+            log_memory_usage(f"después de {api_data}")
+            
+            print(f"✅ Endpoint {api_data} procesado ({total_records} registros) y archivos subidos.")
+            
         except Exception as e:
             print(f"❌ Error en endpoint {api_data}: {str(e)}")
+            # Limpiar archivos temporales en caso de error
+            for temp_file in [filename_ts, filename_alias]:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            force_garbage_collection()
 
 def main():
+    print("🚀 Iniciando proceso ETL ServiceTitan...")
+    log_memory_usage("inicio del proceso")
+    
     print("Conectando a BigQuery para obtener compañías...")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f"""
@@ -147,15 +216,27 @@ def main():
     results = client.query(query).result()
     total = 0
     procesadas = 0
+    
     for row in results:
         total += 1
+        print(f"\n📊 Progreso: {total} compañías encontradas, {procesadas} procesadas exitosamente")
+        log_memory_usage(f"antes de compañía {total}")
+        
         try:
             process_company(row)
             procesadas += 1
+            
+            # Forzar garbage collection después de cada compañía
+            force_garbage_collection()
+            log_memory_usage(f"después de compañía {total}")
+            
         except Exception as e:
             print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
+            force_garbage_collection()
+    
     print(f"\n{'='*80}")
     print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
+    log_memory_usage("final del proceso")
 
 if __name__ == "__main__":
-    main() 
+    main()

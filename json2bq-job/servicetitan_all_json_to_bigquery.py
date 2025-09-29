@@ -23,7 +23,7 @@ ENDPOINTS = [
     "employees",
     "campaigns",
     "activities",
-    "timesheets",
+    "jobs_timesheets",    
 ]
 
 # Función para convertir a snake_case
@@ -72,6 +72,52 @@ def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
     blob = bucket.blob(dest_blob_name)
     blob.upload_from_filename(local_file)
     print(f"📤 Subido a gs://{bucket_name}/{dest_blob_name}")
+
+def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, table_final):
+    """Detecta si hay cambios reales entre staging y tabla final"""
+    try:
+        if final_df.empty:
+            return 'INSERT'  # Primera carga
+        
+        # Obtener campos relevantes (excluyendo campos ETL)
+        campos_relevantes = [col.name for col in staging_df.columns if not col.name.startswith('_etl_')]
+        
+        cambios_detectados = []
+        
+        for _, staging_row in staging_df.iterrows():
+            id_val = staging_row['id']
+            
+            # Buscar en tabla final
+            final_rows = final_df[final_df['id'] == id_val]
+            
+            if final_rows.empty:
+                cambios_detectados.append('INSERT')
+            else:
+                final_row = final_rows.iloc[0]
+                
+                # Comparar campos relevantes
+                hay_cambios = False
+                for campo in campos_relevantes:
+                    if str(staging_row[campo]) != str(final_row[campo]):
+                        hay_cambios = True
+                        break
+                
+                if hay_cambios:
+                    cambios_detectados.append('UPDATE')
+                else:
+                    cambios_detectados.append('SYNC')
+        
+        # Determinar operación principal
+        if 'UPDATE' in cambios_detectados:
+            return 'UPDATE'
+        elif 'INSERT' in cambios_detectados:
+            return 'INSERT'
+        else:
+            return 'SYNC'
+            
+    except Exception as e:
+        print(f"⚠️  Error detectando cambios: {str(e)}")
+        return 'UPDATE'  # Por defecto, asumir UPDATE    
 
 def process_company(row):
     company_id = row.company_id
@@ -217,9 +263,16 @@ def process_company(row):
             print(f"✅ Tabla final {dataset_final}.{table_final} ya existe.")
         except NotFound:
             schema = bq_client.get_table(table_ref_staging).schema
-            table = bigquery.Table(table_ref_final, schema=schema)
+            # AGREGAR CAMPOS ETL AL ESQUEMA (SOLO 2 CAMPOS)
+            campos_etl = [
+                bigquery.SchemaField("_etl_synced", "TIMESTAMP", mode="REQUIRED"),
+                bigquery.SchemaField("_etl_operation", "STRING", mode="REQUIRED")
+            ]
+            schema_completo = list(schema) + campos_etl
+            
+            table = bigquery.Table(table_ref_final, schema=schema_completo)
             bq_client.create_table(table)
-            print(f"🆕 Tabla final {dataset_final}.{table_final} creada con el esquema de staging.")
+            print(f"🆕 Tabla final {dataset_final}.{table_final} creada con esquema ETL.")
             
             log_event_bq(
                 company_id=company_id,
@@ -228,22 +281,34 @@ def process_company(row):
                 endpoint=endpoint,
                 event_type="INFO",
                 event_title="Tabla final creada",
-                event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente"
+                event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente con campos ETL"
             )
         
-        # MERGE incremental a tabla final
+        # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''
             MERGE `{project_id}.{dataset_final}.{table_final}` T
             USING `{project_id}.{dataset_staging}.{table_staging}` S
             ON T.id = S.id
-            WHEN MATCHED THEN UPDATE SET {', '.join([f'T.{col.name} = S.{col.name}' for col in bq_client.get_table(table_ref_staging).schema if col.name != 'id'])}
-            WHEN NOT MATCHED THEN INSERT ROW
+            WHEN MATCHED THEN UPDATE SET 
+                {', '.join([f'T.{col.name} = S.{col.name}' for col in bq_client.get_table(table_ref_staging).schema if col.name != 'id'])},
+                T._etl_synced = CURRENT_TIMESTAMP(),
+                T._etl_operation = 'UPDATE'
+            WHEN NOT MATCHED THEN INSERT (
+                {', '.join([col.name for col in bq_client.get_table(table_ref_staging).schema])},
+                _etl_synced, _etl_operation
+            ) VALUES (
+                {', '.join([f'S.{col.name}' for col in bq_client.get_table(table_ref_staging).schema])},
+                CURRENT_TIMESTAMP(), 'INSERT'
+            )
+            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
+                T._etl_synced = CURRENT_TIMESTAMP(),
+                T._etl_operation = 'DELETE'
         '''
         
         try:
             query_job = bq_client.query(merge_sql)
             query_job.result()
-            print(f"🔀 MERGE ejecutado: {dataset_final}.{table_final} actualizado.")
+            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
             
             # Solo borrar tabla staging si el MERGE fue exitoso
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
@@ -256,7 +321,7 @@ def process_company(row):
                 endpoint=endpoint,
                 event_type="SUCCESS",
                 event_title="MERGE exitoso",
-                event_message=f"MERGE ejecutado exitosamente y tabla staging eliminada"
+                event_message=f"MERGE con Soft Delete ejecutado exitosamente y tabla staging eliminada"
             )
         except Exception as e:
             log_event_bq(
