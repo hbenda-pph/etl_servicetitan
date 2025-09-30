@@ -51,6 +51,7 @@ class ServiceTitanAuth:
             'tenant_id': tenant_id,
             'app_key': app_key
         }
+    
     def get_access_token(self):
         response = requests.post(
             self.AUTH_URL,
@@ -67,6 +68,7 @@ class ServiceTitanAuth:
         )
         response.raise_for_status()
         return response.json()['access_token']
+    
     def get_data_streaming(self, api_url_base, api_data, output_file):
         """Stream data directly to file to avoid memory accumulation"""
         token = self.get_access_token()
@@ -82,10 +84,9 @@ class ServiceTitanAuth:
             first_page = True
             
             while True:
-                # Verificar memoria antes de cada página
+                # Verificar memoria antes de cada página (silencioso)
                 current_memory = log_memory_usage()
                 if current_memory > max_memory_mb:
-                    print(f"⚠️ Memoria alta ({current_memory:.0f}MB), forzando garbage collection...")
                     gc.collect()
                 
                 url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
@@ -122,7 +123,7 @@ class ServiceTitanAuth:
             
             f.write('\n]')
         
-        print(f"✅ Total de registros procesados: {total_records}")
+        print(f"✅ Total de registros procesados: {total_records:,}")
         return total_records
 
 def ensure_bucket_exists(project_id, region="US"):
@@ -144,7 +145,6 @@ def process_company(row):
     # Obtener credenciales y datos
     company_id = row.company_id
     company_name = row.company_name
-    company_new_name = row.company_new_name
     app_id = row.app_id
     client_id = row.client_id
     client_secret = row.client_secret
@@ -198,9 +198,7 @@ def process_company(row):
 
 def main():
     print("🚀 Iniciando proceso ETL ServiceTitan...")
-    log_memory_usage("inicio del proceso")
     
-    print("Conectando a BigQuery para obtener compañías...")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f"""
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
@@ -216,15 +214,13 @@ def main():
         try:
             process_company(row)
             procesadas += 1
-            gc.collect()  # Garbage collection después de cada compañía
+            gc.collect()
             
         except Exception as e:
             print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
             gc.collect()
     
-    print(f"\n{'='*80}")
-    print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
-    log_memory_usage("final del proceso")
+    print(f"\n🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
 
 if __name__ == "__main__":
     main()
