@@ -47,17 +47,87 @@ Todas las tablas incluyen campos de auditoría automáticos:
 | `_etl_synced` | TIMESTAMP | Timestamp de la última operación |
 | `_etl_operation` | STRING | Tipo de operación: INSERT, UPDATE, DELETE |
 
-## 🚀 Comandos de Build y Deploy
+## 🚀 Build y Deploy
 
-### Job #1 (Extracción)
+### ⚡ Método Recomendado: Scripts Automatizados
 
-#### Build
+Cada job tiene su propio script `build_deploy.sh` que maneja automáticamente el build y deploy según el ambiente.
+
+#### Job #1 (Extracción - st2json-job)
+
 ```bash
-gcloud builds submit --tag gcr.io/platform-partners-des/etl-st2json
+cd st2json-job
+
+# Deploy según ambiente activo de gcloud
+./build_deploy.sh
+
+# O especificar ambiente explícitamente
+./build_deploy.sh des    # Deploy en DES
+./build_deploy.sh qua    # Deploy en QUA
+./build_deploy.sh pro    # Deploy en PRO
 ```
 
-#### Deploy
+#### Job #2 (Procesamiento - json2bq-job)
+
 ```bash
+cd json2bq-job
+
+# Deploy según ambiente activo de gcloud
+./build_deploy.sh
+
+# O especificar ambiente explícitamente
+./build_deploy.sh des    # Deploy en DES
+./build_deploy.sh qua    # Deploy en QUA
+./build_deploy.sh pro    # Deploy en PRO
+```
+
+### 📝 Características de los Scripts
+
+- ✅ **Detección automática de ambiente** basada en proyecto activo de gcloud
+- ✅ **Validación de ambiente** (des/qua/pro)
+- ✅ **Configuración automática** de service accounts y recursos según ambiente
+- ✅ **Build y Deploy en un solo comando**
+- ✅ **Mensajes informativos** con comandos útiles post-deploy
+
+### 🔄 Workflow de Deploy Multi-Ambiente
+
+```bash
+# 1. Desarrollo (DES)
+gcloud config set project platform-partners-des
+cd st2json-job && ./build_deploy.sh && cd ..
+cd json2bq-job && ./build_deploy.sh && cd ..
+
+# 2. Validación (QUA)
+gcloud config set project platform-partners-qua
+cd st2json-job && ./build_deploy.sh && cd ..
+cd json2bq-job && ./build_deploy.sh && cd ..
+
+# 3. Producción (PRO)
+gcloud config set project platform-partners-pro
+cd st2json-job && ./build_deploy.sh && cd ..
+cd json2bq-job && ./build_deploy.sh && cd ..
+```
+
+O especificar ambiente explícitamente:
+```bash
+cd st2json-job
+./build_deploy.sh des  # Desarrollo
+./build_deploy.sh qua  # Validación
+./build_deploy.sh pro  # Producción
+```
+
+### 🔧 Método Manual (Comandos Individuales)
+
+Si prefieres ejecutar los comandos manualmente:
+
+#### Job #1 - Build & Deploy Manual
+```bash
+cd st2json-job
+
+# Build
+gcloud builds submit --tag gcr.io/platform-partners-des/etl-st2json
+
+# Deploy
 gcloud run jobs update etl-st2json-job \
   --image gcr.io/platform-partners-des/etl-st2json \
   --region us-east1 \
@@ -69,15 +139,14 @@ gcloud run jobs update etl-st2json-job \
   --task-timeout 1800
 ```
 
-### Job #2 (Procesamiento)
-
-#### Build
+#### Job #2 - Build & Deploy Manual
 ```bash
+cd json2bq-job
+
+# Build
 gcloud builds submit --tag gcr.io/platform-partners-des/etl-json2bq
-```
 
-#### Deploy
-```bash
+# Deploy
 gcloud run jobs update etl-json2bq-job \
   --image gcr.io/platform-partners-des/etl-json2bq \
   --region us-east1 \
@@ -139,16 +208,19 @@ gcloud functions deploy orchestrate-etl-jobs \
 ```
 etl_servicetitan/
 ├── orchestrate_etl/
-│   └── main.py                 # Función orquestadora
+│   └── main.py                              # Función orquestadora
 ├── st2json-job/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── servicetitan_all_st_to_json.py
+│   ├── Dockerfile                           # Configuración Docker
+│   ├── requirements.txt                     # Dependencias Python
+│   ├── servicetitan_all_st_to_json.py      # Script principal
+│   ├── estimates_single_company.py          # Script para estimates individual
+│   └── build_deploy.sh                      # Script de build & deploy
 ├── json2bq-job/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── servicetitan_all_json_to_bigquery.py
-└── README.md
+│   ├── Dockerfile                           # Configuración Docker
+│   ├── requirements.txt                     # Dependencias Python
+│   ├── servicetitan_all_json_to_bigquery.py # Script principal
+│   └── build_deploy.sh                      # Script de build & deploy
+└── README.md                                # Documentación completa
 ```
 
 ## 🛠️ Configuración
