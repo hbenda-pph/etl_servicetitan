@@ -3,7 +3,6 @@ from requests.auth import HTTPBasicAuth
 import json
 from datetime import datetime
 import os
-import gc
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -19,10 +18,11 @@ ENDPOINTS = [
     ("settings/v2/tenant", "employees"),
     ("marketing/v2/tenant", "campaigns"),
     ("timesheets/v2/tenant", "activities"),
-    ("payroll/v2/tenant", "jobs/timesheets"),
-    ("payroll/v2/tenant", "payrolls"),    
-    ("sales/v2/tenant", "estimates")
+    ("payroll/v2/tenant", "jobs/timesheets")
 ]
+# Endpoints deshabilitados temporalmente (causan OOM):
+#    ("payroll/v2/tenant", "payrolls"),    
+#    ("sales/v2/tenant", "estimates")
 #    ("timesheets/v2/tenant", "timesheets"),
 
 # Clase de autenticación y descarga
@@ -157,12 +157,8 @@ def main():
         try:
             process_company(row)
             procesadas += 1
-            # Garbage collection después de cada compañía
-            gc.collect()
         except Exception as e:
             print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
-            # Garbage collection también en caso de error
-            gc.collect()
     print(f"\n{'='*80}")
     print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
 
