@@ -203,6 +203,27 @@ gcloud functions deploy orchestrate-etl-jobs \
 - activities
 - timesheets
 
+## 🧪 Herramientas de Testing
+
+### Script de Prueba ETL Completo
+
+**`test_etl_single_company.py`** - Prueba el flujo completo (extracción + carga) para una compañía:
+
+```bash
+# Editar COMPANY_ID y TEST_ENDPOINTS en el archivo
+python test_etl_single_company.py
+```
+
+### Notebook Interactivo
+
+**`test_etl_flow.ipynb`** - Versión visual e interactiva:
+
+```bash
+jupyter notebook test_etl_flow.ipynb
+```
+
+**Uso:** Ideal para probar nuevos endpoints antes de implementarlos en producción.
+
 ## 📁 Estructura del Proyecto
 
 ```
@@ -220,6 +241,8 @@ etl_servicetitan/
 │   ├── requirements.txt                     # Dependencias Python
 │   ├── servicetitan_all_json_to_bigquery.py # Script principal
 │   └── build_deploy.sh                      # Script de build & deploy
+├── test_etl_single_company.py               # Script de prueba ETL completo
+├── test_etl_flow.ipynb                       # Notebook de prueba ETL
 └── README.md                                # Documentación completa
 ```
 
