@@ -104,7 +104,7 @@ def process_company(row):
     client_secret = row.client_secret
     tenant_id = row.tenant_id
     app_key = row.app_key
-    project_id = row.company_project_id  # Usar directamente el campo project_id
+    project_id = "pph-inbox"  # Proyecto fijo para INBOX
     print(f"\n{'='*80}\n🏢 Procesando compañía INBOX: {company_name} (ID: {company_id}) | project_id: {project_id}")
     # 1. Crear/verificar bucket
     bucket_name = ensure_bucket_exists(project_id)

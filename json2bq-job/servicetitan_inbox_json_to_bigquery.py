@@ -88,7 +88,7 @@ def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, tab
 def process_company(row):
     company_id = row.company_id
     company_name = row.company_name
-    project_id = row.company_project_id
+    project_id = "pph-inbox"  # Proyecto fijo para INBOX
     
     print(f"\n{'='*80}\n🏢 Procesando compañía INBOX: {company_name} (ID: {company_id}) | project_id: {project_id}")
     bucket_name = f"{project_id}_servicetitan"
