@@ -18,7 +18,8 @@ ENDPOINTS = [
     ("settings/v2/tenant", "employees"),
     ("marketing/v2/tenant", "campaigns"),
     ("timesheets/v2/tenant", "activities"),
-    ("payroll/v2/tenant", "jobs/timesheets")
+    ("payroll/v2/tenant", "jobs/timesheets"),
+    ("inventory/v2/tenant", "purchase-orders")
 ]
 # Endpoints deshabilitados temporalmente (causan OOM):
 #    ("payroll/v2/tenant", "payrolls"),    
