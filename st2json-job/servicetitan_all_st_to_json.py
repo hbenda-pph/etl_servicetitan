@@ -66,6 +66,8 @@ class ServiceTitanAuth:
         all_data = []
         page = 1
         page_size = 5000
+        max_pages = 5000  # límite de la API ServiceTitan
+        prev_total = 0
         while True:
             url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
             response = requests.get(
@@ -78,10 +80,20 @@ class ServiceTitanAuth:
             )
             response.raise_for_status()
             data = response.json()
-            all_data.extend(data.get("data", []))
-            if len(data.get("data", [])) < page_size:
+            page_items = data.get("data", [])
+            if not page_items:
+                break  # sin datos en esta página
+            all_data.extend(page_items)
+            # romper si no hay crecimiento para evitar paginación defectuosa
+            if len(all_data) == prev_total:
+                break
+            prev_total = len(all_data)
+            # última página detectada por tamaño parcial
+            if len(page_items) < page_size:
                 break
             page += 1
+            if page > max_pages:
+                break
         return all_data
 
 def ensure_bucket_exists(project_id, region="US"):
