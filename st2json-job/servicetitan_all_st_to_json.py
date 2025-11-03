@@ -66,7 +66,6 @@ class ServiceTitanAuth:
         all_data = []
         page = 1
         page_size = 5000
-        max_pages = 5000  # límite de la API ServiceTitan
         prev_total = 0
         while True:
             url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
@@ -92,8 +91,6 @@ class ServiceTitanAuth:
             if len(page_items) < page_size:
                 break
             page += 1
-            if page > max_pages:
-                break
         return all_data
 
 def ensure_bucket_exists(project_id, region="US"):
