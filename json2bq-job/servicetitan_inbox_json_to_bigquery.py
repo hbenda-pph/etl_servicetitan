@@ -15,7 +15,9 @@ ENDPOINTS = [
     "job-types",
     "technicians",
     "campaigns",
-    "jobs_timesheets"
+    "jobs_timesheets",
+    "purchase-orders",
+    "returns"
 ]
 
 # Función para convertir a snake_case

@@ -15,7 +15,9 @@ ENDPOINTS = [
     ("jpm/v2/tenant/", "job-types"),
     ("settings/v2/tenant", "technicians"),
     ("marketing/v2/tenant", "campaigns"),
-    ("payroll/v2/tenant", "jobs/timesheets")
+    ("payroll/v2/tenant", "jobs/timesheets"),
+    ("inventory/v2/tenant", "purchase-orders"),
+    ("inventory/v2/tenant", "returns")
 ]
 
 # Clase de autenticación y descarga
