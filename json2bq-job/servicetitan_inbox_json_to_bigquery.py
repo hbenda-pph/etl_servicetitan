@@ -6,9 +6,9 @@ from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
 
 # Configuración de BigQuery para la tabla de compañías INBOX
-PROJECT_SOURCE = "platform-partners-des"
+PROJECT_SOURCE = "pph-inbox"
 DATASET_NAME = "settings"
-TABLE_NAME = "companies_inbox"
+TABLE_NAME = "companies"
 
 # Endpoints y nombres de archivo a procesar (versión reducida para Free Trial)
 ENDPOINTS = [

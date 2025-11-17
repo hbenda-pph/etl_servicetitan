@@ -6,9 +6,9 @@ import os
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery para INBOX
-PROJECT_SOURCE = "platform-partners-des"
+PROJECT_SOURCE = "pph-inbox"
 DATASET_NAME = "settings"
-TABLE_NAME = "companies_inbox"
+TABLE_NAME = "companies"
 
 # Endpoints a consultar (versión reducida para Free Trial)
 ENDPOINTS = [

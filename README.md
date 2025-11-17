@@ -281,6 +281,61 @@ gcloud projects add-iam-policy-binding platform-partners-des \
   --role="roles/run.invoker"
 ```
 
+## 🔐 Configuración de Permisos para Jobs INBOX (pph-inbox)
+
+### **Solución Todo-en-Uno** (Recomendado)
+
+Si quieres configurar todos los permisos de una vez:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe pph-inbox --format="value(projectNumber)")
+SERVICE_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+# Habilitar APIs necesarias
+gcloud services enable cloudbuild.googleapis.com --project=pph-inbox
+gcloud services enable artifactregistry.googleapis.com --project=pph-inbox
+
+# Otorgar todos los roles necesarios
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/cloudbuild.builds.builder"
+
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/storage.admin"
+
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/artifactregistry.writer"
+
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/logging.logWriter"
+
+# Otorgar permiso para usar el service account etl-servicetitan (necesario para Cloud Run Jobs)
+# Para la cuenta de servicio de compute (usada por Cloud Build)
+gcloud iam service-accounts add-iam-policy-binding etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/iam.serviceAccountUser" \
+    --project=pph-inbox
+
+# Para la cuenta de usuario que ejecuta comandos gcloud (reemplaza TU_CUENTA@DOMINIO.com)
+gcloud iam service-accounts add-iam-policy-binding etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
+    --member="user:TU_CUENTA@DOMINIO.com" \
+    --role="roles/iam.serviceAccountUser" \
+    --project=pph-inbox
+```
+
+### Permisos de BigQuery para el Service Account
+
+El service account `etl-servicetitan@pph-inbox.iam.gserviceaccount.com` necesita permisos en `pph-inbox`:
+
+```bash
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
+    --role="roles/bigquery.admin"
+```
+
 ## 📈 Monitoreo
 
 ### Logs de Cloud Run Jobs
