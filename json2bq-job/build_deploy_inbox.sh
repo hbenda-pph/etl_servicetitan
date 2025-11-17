@@ -53,10 +53,48 @@ fi
 
 # Verificar proyecto activo
 CURRENT_PROJECT=$(gcloud config get-value project 2>/dev/null)
+CURRENT_ACCOUNT=$(gcloud config get-value account 2>/dev/null)
+
+echo "🔍 Verificando acceso al proyecto..."
+echo "   Cuenta activa: ${CURRENT_ACCOUNT}"
+echo "   Proyecto actual: ${CURRENT_PROJECT}"
+
+# Verificar que el proyecto existe y es accesible
+if ! gcloud projects describe ${PROJECT_ID} &>/dev/null; then
+    echo ""
+    echo "❌ ERROR: No se puede acceder al proyecto ${PROJECT_ID}"
+    echo ""
+    echo "🔧 Soluciones posibles:"
+    echo "   1. Verificar que el proyecto existe:"
+    echo "      gcloud projects list | grep ${PROJECT_ID}"
+    echo ""
+    echo "   2. Verificar que tu cuenta tiene acceso:"
+    echo "      gcloud projects get-iam-policy ${PROJECT_ID}"
+    echo ""
+    echo "   3. Cambiar a una cuenta con permisos:"
+    echo "      gcloud auth login"
+    echo "      gcloud config set account TU_CUENTA@DOMINIO.com"
+    echo ""
+    echo "   4. Solicitar permisos al administrador del proyecto"
+    echo ""
+    exit 1
+fi
+
 if [ "$CURRENT_PROJECT" != "$PROJECT_ID" ]; then
     echo "⚠️  Proyecto actual: ${CURRENT_PROJECT}"
     echo "🔧 Configurando proyecto a: ${PROJECT_ID}"
     gcloud config set project ${PROJECT_ID}
+fi
+
+# Verificar que Cloud Build API está habilitada
+echo "🔍 Verificando APIs habilitadas..."
+if ! gcloud services list --enabled --project=${PROJECT_ID} --filter="name:cloudbuild.googleapis.com" --format="value(name)" | grep -q cloudbuild; then
+    echo "⚠️  Cloud Build API no está habilitada. Intentando habilitar..."
+    gcloud services enable cloudbuild.googleapis.com --project=${PROJECT_ID}
+    if [ $? -ne 0 ]; then
+        echo "❌ Error: No se pudo habilitar Cloud Build API. Verifica permisos."
+        exit 1
+    fi
 fi
 
 echo ""
