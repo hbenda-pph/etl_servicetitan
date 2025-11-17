@@ -123,7 +123,7 @@ fi
 echo ""
 echo "🔨 PASO 1: BUILD (Creando imagen Docker)"
 echo "=========================================="
-gcloud builds submit --tag ${IMAGE_TAG}
+gcloud builds submit --tag ${IMAGE_TAG} --build-arg SCRIPT_NAME=servicetitan_all_st_to_json.py
 
 if [ $? -eq 0 ]; then
     echo "✅ Build exitoso!"
