@@ -62,13 +62,32 @@ fi
 echo ""
 echo "🔨 PASO 1: BUILD (Creando imagen Docker)"
 echo "=========================================="
-echo "📝 Usando Dockerfile con script: servicetitan_inbox_json_to_bigquery.py"
-gcloud builds submit --tag ${IMAGE_TAG} --build-arg SCRIPT_NAME=servicetitan_inbox_json_to_bigquery.py
+echo "📝 Usando Dockerfile.inbox para build..."
+
+# Guardar Dockerfile original si existe
+if [ -f "Dockerfile" ]; then
+    cp Dockerfile Dockerfile.original.backup
+fi
+
+# Usar Dockerfile.inbox para el build
+cp Dockerfile.inbox Dockerfile
+gcloud builds submit --tag ${IMAGE_TAG}
+
+# Restaurar Dockerfile original si existía
+if [ -f "Dockerfile.original.backup" ]; then
+    mv Dockerfile.original.backup Dockerfile
+else
+    rm -f Dockerfile
+fi
 
 if [ $? -eq 0 ]; then
     echo "✅ Build exitoso!"
 else
     echo "❌ Error en el build"
+    # Limpiar en caso de error
+    if [ -f "Dockerfile.original.backup" ]; then
+        mv Dockerfile.original.backup Dockerfile
+    fi
     exit 1
 fi
 

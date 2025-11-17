@@ -1,4 +1,3 @@
-###Script Dockerfile:
 FROM python:3.11-slim
 
 # Set basic environment variables
@@ -9,4 +8,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "servicetitan_all_st_to_json.py"]
+CMD ["python", "servicetitan_inbox_st_to_json.py"]
+
