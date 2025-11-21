@@ -132,8 +132,9 @@ echo "⏰ PASO 3: CONFIGURAR SCHEDULE (Cloud Scheduler)"
 echo "=================================================="
 
 # Crear o actualizar el schedule
-# Nota: Cloud Scheduler necesita usar la API REST de Cloud Run Jobs
-JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
+# Nota: Usar el formato correcto de la API REST de Cloud Run Jobs
+# El formato correcto es: projects/{project}/locations/{location}/jobs/{job}:run
+JOB_URI="https://${REGION}-run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}:run"
 
 if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
     echo "📝 Schedule existente encontrado. Actualizando..."

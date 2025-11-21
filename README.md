@@ -326,14 +326,120 @@ gcloud iam service-accounts add-iam-policy-binding etl-servicetitan@pph-inbox.ia
     --project=pph-inbox
 ```
 
-### Permisos de BigQuery para el Service Account
+### Permisos de BigQuery y Storage para el Service Account
 
 El service account `etl-servicetitan@pph-inbox.iam.gserviceaccount.com` necesita permisos en `pph-inbox`:
 
 ```bash
+# Permisos de BigQuery
 gcloud projects add-iam-policy-binding pph-inbox \
     --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
     --role="roles/bigquery.admin"
+
+# Permisos de Storage
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
+    --role="roles/storage.admin"
+
+# Permisos específicos en el bucket (si el permiso a nivel de proyecto no es suficiente)
+# Nota: Este comando debe ejecutarse con una cuenta que tenga permisos de administrador en el bucket
+gcloud storage buckets add-iam-policy-binding gs://pph-inbox_servicetitan \
+    --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
+    --role="roles/storage.admin" \
+    --project=pph-inbox
+
+# Permisos para Cloud Run Jobs (necesario para que Cloud Scheduler pueda invocar los jobs)
+gcloud projects add-iam-policy-binding pph-inbox \
+    --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
+    --role="roles/run.invoker"
+```
+
+## ⏰ Verificar y Gestionar Schedules de Jobs INBOX
+
+### Verificar si los schedules existen y están activos
+
+```bash
+# Listar todos los schedules en pph-inbox
+gcloud scheduler jobs list --location=us-east1 --project=pph-inbox
+
+# Ver detalles del schedule st2json
+gcloud scheduler jobs describe etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+
+# Ver detalles del schedule json2bq
+gcloud scheduler jobs describe etl-inbox-json2bq-schedule --location=us-east1 --project=pph-inbox
+```
+
+### Verificar si Cloud Scheduler API está habilitada
+
+```bash
+gcloud services list --enabled --project=pph-inbox --filter="name:cloudscheduler.googleapis.com"
+```
+
+Si no está habilitada, habilitarla con:
+```bash
+gcloud services enable cloudscheduler.googleapis.com --project=pph-inbox
+```
+
+### Crear/Actualizar schedules manualmente
+
+Si el schedule no se creó automáticamente, puedes crearlo manualmente:
+
+```bash
+# Para st2json-job
+gcloud scheduler jobs create http etl-inbox-st2json-schedule \
+    --location=us-east1 \
+    --project=pph-inbox \
+    --schedule="0 */6 * * *" \
+    --uri="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-st2json-job:run" \
+    --http-method=POST \
+    --oidc-service-account-email=etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
+    --time-zone="America/New_York"
+
+# Para json2bq-job
+gcloud scheduler jobs create http etl-inbox-json2bq-schedule \
+    --location=us-east1 \
+    --project=pph-inbox \
+    --schedule="0 */6 * * *" \
+    --uri="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-json2bq-job:run" \
+    --http-method=POST \
+    --oidc-service-account-email=etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
+    --time-zone="America/New_York"
+```
+
+### Pausar/Reanudar schedules
+
+```bash
+# Pausar un schedule
+gcloud scheduler jobs pause etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+
+# Reanudar un schedule
+gcloud scheduler jobs resume etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+```
+
+### Ver ejecuciones del schedule y errores
+
+```bash
+# Ver ejecuciones recientes del schedule st2json
+gcloud scheduler jobs list-executions etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+
+# Ver ejecuciones recientes del schedule json2bq
+gcloud scheduler jobs list-executions etl-inbox-json2bq-schedule --location=us-east1 --project=pph-inbox
+
+# Ver detalles de una ejecución específica (incluye el error si falló)
+gcloud scheduler jobs describe-execution EXECUTION_ID --location=us-east1 --project=pph-inbox
+
+# Ver logs de errores del schedule
+gcloud logging read "resource.type=cloud_scheduler_job AND resource.labels.job_id=etl-inbox-st2json-schedule" --limit=20 --project=pph-inbox --format="table(timestamp,severity,textPayload)"
+```
+
+### Ejecutar manualmente un schedule (para pruebas)
+
+```bash
+# Ejecutar el schedule st2json manualmente
+gcloud scheduler jobs run etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+
+# Ejecutar el schedule json2bq manualmente
+gcloud scheduler jobs run etl-inbox-json2bq-schedule --location=us-east1 --project=pph-inbox
 ```
 
 ## 📈 Monitoreo
