@@ -145,6 +145,7 @@ if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --projec
         --uri="${JOB_URI}" \
         --http-method=POST \
         --oidc-service-account-email=${SERVICE_ACCOUNT} \
+        --oidc-token-audience="${JOB_URI}" \
         --time-zone="America/New_York"
 else
     echo "📝 Schedule no existe. Creando nuevo schedule..."
@@ -155,6 +156,7 @@ else
         --uri="${JOB_URI}" \
         --http-method=POST \
         --oidc-service-account-email=${SERVICE_ACCOUNT} \
+        --oidc-token-audience="${JOB_URI}" \
         --time-zone="America/New_York"
 fi
 
