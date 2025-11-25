@@ -22,15 +22,16 @@ ENDPOINTS = [
     "technicians",
     "employees",
     "campaigns",
-    "activities",
     "jobs_timesheets",    
     "purchase-orders",
-    "returns"
+    "returns",
+    "export_job-canceled-logs"
 ]
 # Endpoints deshabilitados temporalmente (causan OOM en st2json-job):
 #    "payrolls",
 #    "estimates",
 #    "timesheets",
+#    "activities",
 
 # Función para convertir a snake_case
 def to_snake_case(name):

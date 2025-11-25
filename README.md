@@ -283,9 +283,7 @@ gcloud projects add-iam-policy-binding platform-partners-des \
 
 ## 🔐 Configuración de Permisos para Jobs INBOX (pph-inbox)
 
-### **Solución Todo-en-Uno** (Recomendado)
-
-Si quieres configurar todos los permisos de una vez:
+### Permisos para Cloud Build (cuenta de servicio de Compute Engine)
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe pph-inbox --format="value(projectNumber)")
@@ -295,7 +293,7 @@ SERVICE_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 gcloud services enable cloudbuild.googleapis.com --project=pph-inbox
 gcloud services enable artifactregistry.googleapis.com --project=pph-inbox
 
-# Otorgar todos los roles necesarios
+# Otorgar roles necesarios para Cloud Build
 gcloud projects add-iam-policy-binding pph-inbox \
     --member="serviceAccount:${SERVICE_ACCOUNT}" \
     --role="roles/cloudbuild.builds.builder"
@@ -312,23 +310,14 @@ gcloud projects add-iam-policy-binding pph-inbox \
     --member="serviceAccount:${SERVICE_ACCOUNT}" \
     --role="roles/logging.logWriter"
 
-# Otorgar permiso para usar el service account etl-servicetitan (necesario para Cloud Run Jobs)
-# Para la cuenta de servicio de compute (usada por Cloud Build)
+# Permiso para usar el service account etl-servicetitan (necesario para Cloud Run Jobs)
 gcloud iam service-accounts add-iam-policy-binding etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
     --member="serviceAccount:${SERVICE_ACCOUNT}" \
     --role="roles/iam.serviceAccountUser" \
     --project=pph-inbox
-
-# Para la cuenta de usuario que ejecuta comandos gcloud (reemplaza TU_CUENTA@DOMINIO.com)
-gcloud iam service-accounts add-iam-policy-binding etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
-    --member="user:TU_CUENTA@DOMINIO.com" \
-    --role="roles/iam.serviceAccountUser" \
-    --project=pph-inbox
 ```
 
-### Permisos de BigQuery y Storage para el Service Account
-
-El service account `etl-servicetitan@pph-inbox.iam.gserviceaccount.com` necesita permisos en `pph-inbox`:
+### Permisos para el Service Account etl-servicetitan
 
 ```bash
 # Permisos de BigQuery
@@ -341,16 +330,13 @@ gcloud projects add-iam-policy-binding pph-inbox \
     --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
     --role="roles/storage.admin"
 
-# Permisos específicos en el bucket (si el permiso a nivel de proyecto no es suficiente)
-# Nota: Este comando debe ejecutarse con una cuenta que tenga permisos de administrador en el bucket
+# Permisos en el bucket específico
 gcloud storage buckets add-iam-policy-binding gs://pph-inbox_servicetitan \
     --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
     --role="roles/storage.admin" \
     --project=pph-inbox
 
-# Permisos para Cloud Run Jobs (necesario para que Cloud Scheduler pueda invocar los jobs)
-# El service account usado por Cloud Scheduler debe poder invocar los jobs
-# IMPORTANTE: Estos permisos deben otorgarse a nivel de cada job individual
+# Permisos para invocar Cloud Run Jobs (necesario para Cloud Scheduler)
 gcloud run jobs add-iam-policy-binding etl-inbox-st2json-job \
     --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
     --role="roles/run.invoker" \
@@ -362,127 +348,45 @@ gcloud run jobs add-iam-policy-binding etl-inbox-json2bq-job \
     --role="roles/run.invoker" \
     --region=us-east1 \
     --project=pph-inbox
+```
 
-# También otorgar permisos a nivel de proyecto (por si acaso)
+### Comandos GCloud para permisos en Cloud Scheduler para Cloud Run Jobs
+
+```bash
+# Comando gcloud para IAM (otorgar permiso a nivel de proyecto)
 gcloud projects add-iam-policy-binding pph-inbox \
     --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
-    --role="roles/run.invoker"
-```
-
-## ⏰ Verificar y Gestionar Schedules de Jobs INBOX
-
-### Verificar si los schedules existen y están activos
-
-```bash
-# Listar todos los schedules en pph-inbox
-gcloud scheduler jobs list --location=us-east1 --project=pph-inbox
-
-# Ver detalles del schedule st2json
-gcloud scheduler jobs describe etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
-
-# Ver detalles del schedule json2bq
-gcloud scheduler jobs describe etl-inbox-json2bq-schedule --location=us-east1 --project=pph-inbox
-```
-
-### Verificar si Cloud Scheduler API está habilitada
-
-```bash
-gcloud services list --enabled --project=pph-inbox --filter="name:cloudscheduler.googleapis.com"
-```
-
-Si no está habilitada, habilitarla con:
-```bash
-gcloud services enable cloudscheduler.googleapis.com --project=pph-inbox
-```
-
-### Crear/Actualizar schedules manualmente
-
-Si el schedule no se creó automáticamente, puedes crearlo manualmente:
-
-```bash
-# Para st2json-job
-gcloud scheduler jobs create http etl-inbox-st2json-schedule \
-    --location=us-east1 \
-    --project=pph-inbox \
-    --schedule="0 */6 * * *" \
-    --uri="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-st2json-job:run" \
-    --http-method=POST \
-    --oidc-service-account-email=etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
-    --oidc-token-audience="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-st2json-job:run" \
-    --time-zone="America/New_York"
-
-# Para json2bq-job
-gcloud scheduler jobs create http etl-inbox-json2bq-schedule \
-    --location=us-east1 \
-    --project=pph-inbox \
-    --schedule="0 */6 * * *" \
-    --uri="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-json2bq-job:run" \
-    --http-method=POST \
-    --oidc-service-account-email=etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
-    --oidc-token-audience="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-json2bq-job:run" \
-    --time-zone="America/New_York"
-```
-
-### Pausar/Reanudar schedules
-
-```bash
-# Pausar un schedule
-gcloud scheduler jobs pause etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
-
-# Reanudar un schedule
-gcloud scheduler jobs resume etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
-```
-
-### Ver ejecuciones del schedule y errores
-
-```bash
-# Ver ejecuciones recientes del schedule st2json
-gcloud scheduler jobs list-executions etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
-
-# Ver ejecuciones recientes del schedule json2bq
-gcloud scheduler jobs list-executions etl-inbox-json2bq-schedule --location=us-east1 --project=pph-inbox
-
-# Ver detalles de una ejecución específica (incluye el error si falló)
-gcloud scheduler jobs describe-execution EXECUTION_ID --location=us-east1 --project=pph-inbox
-
-# Ver logs de errores del schedule
-gcloud logging read "resource.type=cloud_scheduler_job AND resource.labels.job_id=etl-inbox-st2json-schedule" --limit=20 --project=pph-inbox --format="table(timestamp,severity,textPayload)"
-```
-
-### Verificar y corregir autenticación del schedule
-
-Si el schedule muestra error 401 UNAUTHENTICATED, verifica y corrige:
-
-```bash
-# 1. Verificar qué service account está usando el schedule
-gcloud scheduler jobs describe etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox --format="value(httpTarget.oidcToken.serviceAccountEmail)"
-
-# 2. Verificar permisos del service account en el job
-gcloud run jobs get-iam-policy etl-inbox-st2json-job --region=us-east1 --project=pph-inbox
-
-# 3. Si el service account no tiene permisos, otorgarlos:
-gcloud run jobs add-iam-policy-binding etl-inbox-st2json-job \
-    --member="serviceAccount:etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
     --role="roles/run.invoker" \
-    --region=us-east1 \
-    --project=pph-inbox
+    --condition=None
 
-# 4. Actualizar el schedule para asegurar que use el service account correcto y la audiencia
+# Comandos gcloud para Cloud Scheduler (actualizar schedules con OAuth)
 gcloud scheduler jobs update http etl-inbox-st2json-schedule \
     --location=us-east1 \
-    --project=pph-inbox \
-    --oidc-service-account-email=etl-servicetitan@pph-inbox.iam.gserviceaccount.com \
-    --oidc-token-audience="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-st2json-job:run"
+    --uri="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-st2json-job:run" \
+    --oauth-service-account-email="etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
+    --oauth-token-scope=""
+
+gcloud scheduler jobs update http etl-inbox-json2bq-schedule \
+    --location=us-east1 \
+    --uri="https://us-east1-run.googleapis.com/v2/projects/pph-inbox/locations/us-east1/jobs/etl-inbox-json2bq-job:run" \
+    --oauth-service-account-email="etl-servicetitan@pph-inbox.iam.gserviceaccount.com" \
+    --oauth-token-scope=""
 ```
 
-### Ejecutar manualmente un schedule (para pruebas)
+### Comandos útiles para verificar schedules
 
 ```bash
-# Ejecutar el schedule st2json manualmente
-gcloud scheduler jobs run etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+# Listar schedules
+gcloud scheduler jobs list --location=us-east1 --project=pph-inbox
 
-# Ejecutar el schedule json2bq manualmente
-gcloud scheduler jobs run etl-inbox-json2bq-schedule --location=us-east1 --project=pph-inbox
+# Ver detalles de un schedule
+gcloud scheduler jobs describe etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+
+# Ver ejecuciones recientes
+gcloud scheduler jobs list-executions etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
+
+# Ejecutar manualmente (para pruebas)
+gcloud scheduler jobs run etl-inbox-st2json-schedule --location=us-east1 --project=pph-inbox
 ```
 
 ## 📈 Monitoreo

@@ -17,15 +17,16 @@ ENDPOINTS = [
     ("settings/v2/tenant", "technicians"),
     ("settings/v2/tenant", "employees"),
     ("marketing/v2/tenant", "campaigns"),
-    ("timesheets/v2/tenant", "activities"),
     ("payroll/v2/tenant", "jobs/timesheets"),
     ("inventory/v2/tenant", "purchase-orders"),
-    ("inventory/v2/tenant", "returns")
+    ("inventory/v2/tenant", "returns"),
+    ("jpm/v2/tenant", "export/job-canceled-logs")
 ]
 # Endpoints deshabilitados temporalmente (causan OOM):
 #    ("payroll/v2/tenant", "payrolls"),    
 #    ("sales/v2/tenant", "estimates")
 #    ("timesheets/v2/tenant", "timesheets"),
+#    ("timesheets/v2/tenant", "activities"),
 
 # Clase de autenticación y descarga
 class ServiceTitanAuth:
