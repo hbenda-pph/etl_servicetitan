@@ -92,7 +92,7 @@ class ServiceTitanAuth:
 
     def get_data(self, api_url_base, api_data):
         page_size = 5000
-        max_workers = 10  # 10 requests en paralelo
+        max_workers = 3  # 3 requests en paralelo (reducido para evitar OOM)
         
         # Primera página para saber si hay datos
         _, first_data = self._fetch_page(api_url_base, api_data, 1, page_size)

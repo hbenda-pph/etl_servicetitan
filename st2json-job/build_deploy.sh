@@ -80,8 +80,8 @@ esac
 REGION="us-east1"
 IMAGE_NAME="etl-st2json"
 IMAGE_TAG="gcr.io/${PROJECT_ID}/${IMAGE_NAME}"
-MEMORY="2Gi"
-CPU="2"
+MEMORY="4Gi"
+CPU="4"
 MAX_RETRIES="1"
 TASK_TIMEOUT="1800"
 
