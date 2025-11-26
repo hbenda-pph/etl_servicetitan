@@ -4,7 +4,6 @@ import json
 from datetime import datetime
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -29,6 +28,11 @@ ENDPOINTS = [
 #    ("sales/v2/tenant", "estimates")
 #    ("timesheets/v2/tenant", "timesheets"),
 #    ("timesheets/v2/tenant", "activities"),
+
+# Endpoints que usan streaming (muy grandes, millones de registros)
+STREAMING_ENDPOINTS = [
+    "export/job-canceled-logs"
+]
 
 # Clase de autenticación y descarga
 class ServiceTitanAuth:
@@ -74,63 +78,90 @@ class ServiceTitanAuth:
         self._token_time = time.time()
         return self._token
 
-    def _fetch_page(self, api_url_base, api_data, page, page_size):
-        """Descarga una página individual"""
-        token = self.get_access_token()
-        tenant_id = self.credentials['tenant_id']
-        url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
-        response = requests.get(
-            url,
-            headers={
-                'Authorization': f'Bearer {token}',
-                'ST-App-Id': self.credentials['app_id'],
-                'ST-App-Key': self.credentials['app_key']
-            }
-        )
-        response.raise_for_status()
-        return page, response.json().get("data", [])
-
     def get_data(self, api_url_base, api_data):
+        """Método estándar para endpoints pequeños - retorna lista en memoria"""
         page_size = 5000
-        max_workers = 3  # 3 requests en paralelo (reducido para evitar OOM)
+        all_data = []
+        page = 1
         
-        # Primera página para saber si hay datos
-        _, first_data = self._fetch_page(api_url_base, api_data, 1, page_size)
-        if not first_data:
-            return []
-        
-        all_data = list(first_data)
-        
-        # Si hay más páginas, descargar en paralelo
-        if len(first_data) == page_size:
-            page = 2
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                while True:
-                    # Lanzar batch de páginas en paralelo
-                    futures = {
-                        executor.submit(self._fetch_page, api_url_base, api_data, p, page_size): p
-                        for p in range(page, page + max_workers)
-                    }
-                    
-                    empty_page_found = False
-                    for future in as_completed(futures):
-                        try:
-                            p, page_data = future.result()
-                            if page_data:
-                                all_data.extend(page_data)
-                                if len(page_data) < page_size:
-                                    empty_page_found = True
-                            else:
-                                empty_page_found = True
-                        except Exception as e:
-                            print(f"⚠️ Error en página {futures[future]}: {e}")
-                            empty_page_found = True
-                    
-                    if empty_page_found:
-                        break
-                    page += max_workers
+        while True:
+            token = self.get_access_token()
+            tenant_id = self.credentials['tenant_id']
+            url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
+            response = requests.get(
+                url,
+                headers={
+                    'Authorization': f'Bearer {token}',
+                    'ST-App-Id': self.credentials['app_id'],
+                    'ST-App-Key': self.credentials['app_key']
+                }
+            )
+            response.raise_for_status()
+            page_items = response.json().get("data", [])
+            
+            if not page_items:
+                break
+            all_data.extend(page_items)
+            
+            if len(page_items) < page_size:
+                break
+            page += 1
         
         return all_data
+
+    def get_data_streaming(self, api_url_base, api_data, output_file):
+        """Streaming con checkpoint - para endpoints grandes (millones de registros)"""
+        page_size = 5000
+        checkpoint_file = f"{output_file}.checkpoint"
+        
+        # Verificar si hay checkpoint previo
+        start_page = 1
+        if os.path.exists(checkpoint_file):
+            with open(checkpoint_file, 'r') as f:
+                start_page = int(f.read().strip()) + 1
+            print(f"🔄 Resumiendo desde página {start_page}")
+        
+        page = start_page
+        mode = 'a' if start_page > 1 else 'w'  # Append si resume, Write si nuevo
+        total_records = 0
+        
+        with open(output_file, mode, encoding='utf-8') as f:
+            while True:
+                token = self.get_access_token()
+                tenant_id = self.credentials['tenant_id']
+                url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
+                
+                response = requests.get(url, headers={
+                    'Authorization': f'Bearer {token}',
+                    'ST-App-Id': self.credentials['app_id'],
+                    'ST-App-Key': self.credentials['app_key']
+                })
+                response.raise_for_status()
+                
+                page_items = response.json().get("data", [])
+                if not page_items:
+                    break
+                
+                # Escribir cada item como línea separada (newline-delimited)
+                for item in page_items:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+                
+                # Guardar checkpoint después de cada página exitosa
+                with open(checkpoint_file, 'w') as cp:
+                    cp.write(str(page))
+                
+                total_records += len(page_items)
+                print(f"📄 Página {page}: {len(page_items)} registros (total: {total_records})")
+                
+                if len(page_items) < page_size:
+                    break
+                page += 1
+        
+        # Limpiar checkpoint al terminar exitosamente
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+        
+        return total_records
 
 def ensure_bucket_exists(project_id, region="US"):
     bucket_name = f"{project_id}_servicetitan"
@@ -170,16 +201,28 @@ def process_company(row):
     for api_url_base, api_data in ENDPOINTS:
         print(f"\n🔄 Descargando endpoint: {api_data}")
         try:
-            data = st_client.get_data(api_url_base, api_data)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename_api_data = api_data.replace("/","_") 
             filename_ts = f"servicetitan_{filename_api_data}_{timestamp}.json"
             filename_alias = f"servicetitan_{filename_api_data}.json"
-            # Guardar localmente ambos archivos
-            with open(filename_ts, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            with open(filename_alias, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            # Usar streaming para endpoints grandes, método normal para el resto
+            if api_data in STREAMING_ENDPOINTS:
+                # Streaming: escribe directo a archivo (newline-delimited JSON)
+                total = st_client.get_data_streaming(api_url_base, api_data, filename_alias)
+                print(f"📊 Total registros descargados: {total}")
+                # Copiar para archivo con timestamp
+                with open(filename_alias, 'r', encoding='utf-8') as src:
+                    with open(filename_ts, 'w', encoding='utf-8') as dst:
+                        dst.write(src.read())
+            else:
+                # Método normal: carga en memoria
+                data = st_client.get_data(api_url_base, api_data)
+                with open(filename_ts, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                with open(filename_alias, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            
             # Subir ambos archivos al bucket
             upload_to_bucket(bucket_name, project_id, filename_ts, filename_ts)
             upload_to_bucket(bucket_name, project_id, filename_alias, filename_alias)

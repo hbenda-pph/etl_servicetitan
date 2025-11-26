@@ -65,9 +65,19 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
         print(f"❌ Error en logging: {str(e)}")
 
 def fix_json_format(local_path, temp_path):
-    """Transforma el JSON a formato newline-delimited y snake_case."""
+    """Transforma el JSON a formato newline-delimited y snake_case.
+    Soporta tanto JSON array como newline-delimited JSON."""
     with open(local_path, 'r', encoding='utf-8') as f:
-        json_data = json.load(f)
+        first_char = f.read(1)
+        f.seek(0)
+        
+        if first_char == '[':
+            # JSON array tradicional
+            json_data = json.load(f)
+        else:
+            # Newline-delimited JSON
+            json_data = [json.loads(line) for line in f if line.strip()]
+    
     with open(temp_path, 'w', encoding='utf-8') as f:
         for item in json_data:
             new_item = {to_snake_case(k): v for k, v in item.items()}
