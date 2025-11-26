@@ -3,6 +3,8 @@ from requests.auth import HTTPBasicAuth
 import json
 from datetime import datetime
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -46,7 +48,14 @@ class ServiceTitanAuth:
             'tenant_id': tenant_id,
             'app_key': app_key
         }
+        self._token = None
+        self._token_time = 0
+
     def get_access_token(self):
+        # Renovar si pasaron más de 10 minutos
+        if self._token and (time.time() - self._token_time) < 600:
+            return self._token
+        
         response = requests.post(
             self.AUTH_URL,
             auth=HTTPBasicAuth(self.credentials['client_id'], self.credentials['client_secret']),
@@ -61,38 +70,66 @@ class ServiceTitanAuth:
             }
         )
         response.raise_for_status()
-        return response.json()['access_token']
-    def get_data(self, api_url_base, api_data):
+        self._token = response.json()['access_token']
+        self._token_time = time.time()
+        return self._token
+
+    def _fetch_page(self, api_url_base, api_data, page, page_size):
+        """Descarga una página individual"""
         token = self.get_access_token()
         tenant_id = self.credentials['tenant_id']
-        all_data = []
-        page = 1
+        url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
+        response = requests.get(
+            url,
+            headers={
+                'Authorization': f'Bearer {token}',
+                'ST-App-Id': self.credentials['app_id'],
+                'ST-App-Key': self.credentials['app_key']
+            }
+        )
+        response.raise_for_status()
+        return page, response.json().get("data", [])
+
+    def get_data(self, api_url_base, api_data):
         page_size = 5000
-        prev_total = 0
-        while True:
-            url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
-            response = requests.get(
-                url,
-                headers={
-                    'Authorization': f'Bearer {token}',
-                    'ST-App-Id': self.credentials['app_id'],
-                    'ST-App-Key': self.credentials['app_key']
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-            page_items = data.get("data", [])
-            if not page_items:
-                break  # sin datos en esta página
-            all_data.extend(page_items)
-            # romper si no hay crecimiento para evitar paginación defectuosa
-            if len(all_data) == prev_total:
-                break
-            prev_total = len(all_data)
-            # última página detectada por tamaño parcial
-            if len(page_items) < page_size:
-                break
-            page += 1
+        max_workers = 10  # 10 requests en paralelo
+        
+        # Primera página para saber si hay datos
+        _, first_data = self._fetch_page(api_url_base, api_data, 1, page_size)
+        if not first_data:
+            return []
+        
+        all_data = list(first_data)
+        
+        # Si hay más páginas, descargar en paralelo
+        if len(first_data) == page_size:
+            page = 2
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                while True:
+                    # Lanzar batch de páginas en paralelo
+                    futures = {
+                        executor.submit(self._fetch_page, api_url_base, api_data, p, page_size): p
+                        for p in range(page, page + max_workers)
+                    }
+                    
+                    empty_page_found = False
+                    for future in as_completed(futures):
+                        try:
+                            p, page_data = future.result()
+                            if page_data:
+                                all_data.extend(page_data)
+                                if len(page_data) < page_size:
+                                    empty_page_found = True
+                            else:
+                                empty_page_found = True
+                        except Exception as e:
+                            print(f"⚠️ Error en página {futures[future]}: {e}")
+                            empty_page_found = True
+                    
+                    if empty_page_found:
+                        break
+                    page += max_workers
+        
         return all_data
 
 def ensure_bucket_exists(project_id, region="US"):
