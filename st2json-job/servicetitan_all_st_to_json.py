@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 import os
 import time
+import shutil
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -29,10 +30,6 @@ ENDPOINTS = [
 #    ("timesheets/v2/tenant", "timesheets"),
 #    ("timesheets/v2/tenant", "activities"),
 
-# Endpoints que usan streaming (muy grandes, millones de registros)
-STREAMING_ENDPOINTS = [
-    "export/job-canceled-logs"
-]
 
 # Clase de autenticación y descarga
 class ServiceTitanAuth:
@@ -109,27 +106,20 @@ class ServiceTitanAuth:
         
         return all_data
 
-    def get_data_streaming(self, api_url_base, api_data, output_file):
-        """Streaming con checkpoint - para endpoints grandes (millones de registros)"""
-        page_size = 5000
-        checkpoint_file = f"{output_file}.checkpoint"
-        
-        # Verificar si hay checkpoint previo
-        start_page = 1
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, 'r') as f:
-                start_page = int(f.read().strip()) + 1
-            print(f"🔄 Resumiendo desde página {start_page}")
-        
-        page = start_page
-        mode = 'a' if start_page > 1 else 'w'  # Append si resume, Write si nuevo
+    def get_data_export(self, api_url_base, api_data, output_file, continue_from=None):
+        """Método para endpoints /export/ - usa from/continueFrom en vez de paginación"""
         total_records = 0
         
-        with open(output_file, mode, encoding='utf-8') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             while True:
                 token = self.get_access_token()
                 tenant_id = self.credentials['tenant_id']
-                url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
+                
+                # Construir URL con o sin token de continuación
+                if continue_from:
+                    url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?from={continue_from}"
+                else:
+                    url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}"
                 
                 response = requests.get(url, headers={
                     'Authorization': f'Bearer {token}',
@@ -138,7 +128,11 @@ class ServiceTitanAuth:
                 })
                 response.raise_for_status()
                 
-                page_items = response.json().get("data", [])
+                result = response.json()
+                page_items = result.get("data", [])
+                continue_from = result.get("continueFrom")
+                has_more = result.get("hasMore", False)
+                
                 if not page_items:
                     break
                 
@@ -146,22 +140,14 @@ class ServiceTitanAuth:
                 for item in page_items:
                     f.write(json.dumps(item, ensure_ascii=False) + '\n')
                 
-                # Guardar checkpoint después de cada página exitosa
-                with open(checkpoint_file, 'w') as cp:
-                    cp.write(str(page))
-                
                 total_records += len(page_items)
-                print(f"📄 Página {page}: {len(page_items)} registros (total: {total_records})")
+                print(f"📄 Batch: {len(page_items)} registros (total: {total_records})")
                 
-                if len(page_items) < page_size:
+                # Salir si no hay más datos
+                if not has_more or not continue_from:
                     break
-                page += 1
         
-        # Limpiar checkpoint al terminar exitosamente
-        if os.path.exists(checkpoint_file):
-            os.remove(checkpoint_file)
-        
-        return total_records
+        return total_records, continue_from
 
 def ensure_bucket_exists(project_id, region="US"):
     bucket_name = f"{project_id}_servicetitan"
@@ -206,18 +192,21 @@ def process_company(row):
             filename_ts = f"servicetitan_{filename_api_data}_{timestamp}.json"
             filename_alias = f"servicetitan_{filename_api_data}.json"
             
-            # Usar streaming para endpoints grandes, método normal para el resto
-            if api_data in STREAMING_ENDPOINTS:
-                # Streaming: escribe directo a archivo (newline-delimited JSON)
-                total = st_client.get_data_streaming(api_url_base, api_data, filename_alias)
-                print(f"📊 Total registros descargados: {total}")
+            # Detectar si es endpoint export (usa from/continueFrom) o normal (usa page)
+            if api_data.startswith("export/"):
+                # Endpoint EXPORT: usa continueFrom para paginación
+                print(f"📤 [EXPORT MODE] Usando paginación con continueFrom")
+                total, continue_token = st_client.get_data_export(api_url_base, api_data, filename_alias)
+                print(f"📊 [EXPORT MODE] Total registros descargados: {total}")
+                if continue_token:
+                    print(f"🔖 [EXPORT MODE] Token para próxima ejecución: {continue_token}")
                 # Copiar para archivo con timestamp
-                with open(filename_alias, 'r', encoding='utf-8') as src:
-                    with open(filename_ts, 'w', encoding='utf-8') as dst:
-                        dst.write(src.read())
+                shutil.copy2(filename_alias, filename_ts)
             else:
-                # Método normal: carga en memoria
+                # Endpoint NORMAL: carga en memoria con paginación page=
+                print(f"📥 [NORMAL MODE] Usando paginación con page=")
                 data = st_client.get_data(api_url_base, api_data)
+                print(f"📊 [NORMAL MODE] Total registros descargados: {len(data)}")
                 with open(filename_ts, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 with open(filename_alias, 'w', encoding='utf-8') as f:
