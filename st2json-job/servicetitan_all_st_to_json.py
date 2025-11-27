@@ -23,7 +23,7 @@ ENDPOINTS = [
     ("inventory/v2/tenant", "purchase-orders"),
     ("inventory/v2/tenant", "returns"),
     ("jpm/v2/tenant", "export/job-canceled-logs"),
-    ("jpm/v2/tenant", "jobs/cancel-reasons")    
+    ("jpm/v2/tenant", "job-cancel-reasons")    
 ]
 # Endpoints deshabilitados temporalmente (causan OOM):
 #    ("payroll/v2/tenant", "payrolls"),    

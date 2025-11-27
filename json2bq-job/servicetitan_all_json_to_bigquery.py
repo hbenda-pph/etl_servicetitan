@@ -25,7 +25,7 @@ ENDPOINTS = [
     "jobs_timesheets",    
     "purchase-orders",
     "returns",
-    "jobs_cancel-reasons"
+    "job-cancel-reasons"
 ]
 # Endpoints deshabilitados temporalmente (causan OOM en st2json-job):
 #    "payrolls",
