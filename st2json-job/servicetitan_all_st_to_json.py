@@ -141,7 +141,7 @@ class ServiceTitanAuth:
                     f.write(json.dumps(item, ensure_ascii=False) + '\n')
                 
                 total_records += len(page_items)
-                print(f"📄 Batch: {len(page_items)} registros (total: {total_records})")
+                #print(f"📄 Batch: {len(page_items)} registros (total: {total_records})")
                 
                 # Salir si no hay más datos
                 if not has_more or not continue_from:
@@ -195,7 +195,7 @@ def process_company(row):
             # Detectar si es endpoint export (usa from/continueFrom) o normal (usa page)
             if api_data.startswith("export/"):
                 # Endpoint EXPORT: usa continueFrom para paginación
-                print(f"📤 [EXPORT MODE] Usando paginación con continueFrom")
+                #print(f"📤 [EXPORT MODE] Usando paginación con continueFrom")
                 total, continue_token = st_client.get_data_export(api_url_base, api_data, filename_alias)
                 print(f"📊 [EXPORT MODE] Total registros descargados: {total}")
                 if continue_token:
@@ -204,7 +204,7 @@ def process_company(row):
                 shutil.copy2(filename_alias, filename_ts)
             else:
                 # Endpoint NORMAL: carga en memoria con paginación page=
-                print(f"📥 [NORMAL MODE] Usando paginación con page=")
+                #print(f"📥 [NORMAL MODE] Usando paginación con page=")
                 data = st_client.get_data(api_url_base, api_data)
                 print(f"📊 [NORMAL MODE] Total registros descargados: {len(data)}")
                 with open(filename_ts, 'w', encoding='utf-8') as f:
