@@ -133,22 +133,38 @@ else
 fi
 
 echo ""
-echo "🚀 PASO 2: DEPLOY (Actualizando Cloud Run Job)"
-echo "================================================"
-gcloud run jobs update ${JOB_NAME} \
-    --image ${IMAGE_TAG} \
-    --region ${REGION} \
-    --project ${PROJECT_ID} \
-    --service-account ${SERVICE_ACCOUNT} \
-    --memory ${MEMORY} \
-    --cpu ${CPU} \
-    --max-retries ${MAX_RETRIES} \
-    --task-timeout ${TASK_TIMEOUT}
+echo "🚀 PASO 2: CREATE/UPDATE JOB"
+echo "============================="
+
+# Verificar si el job ya existe
+if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID} &> /dev/null; then
+    echo "📝 Job existe, actualizando..."
+    gcloud run jobs update ${JOB_NAME} \
+        --image ${IMAGE_TAG} \
+        --region ${REGION} \
+        --project ${PROJECT_ID} \
+        --service-account ${SERVICE_ACCOUNT} \
+        --memory ${MEMORY} \
+        --cpu ${CPU} \
+        --max-retries ${MAX_RETRIES} \
+        --task-timeout ${TASK_TIMEOUT}
+else
+    echo "🆕 Job no existe, creando..."
+    gcloud run jobs create ${JOB_NAME} \
+        --image ${IMAGE_TAG} \
+        --region ${REGION} \
+        --project ${PROJECT_ID} \
+        --service-account ${SERVICE_ACCOUNT} \
+        --memory ${MEMORY} \
+        --cpu ${CPU} \
+        --max-retries ${MAX_RETRIES} \
+        --task-timeout ${TASK_TIMEOUT}
+fi
 
 if [ $? -eq 0 ]; then
-    echo "✅ Deploy exitoso!"
+    echo "✅ Job creado/actualizado exitosamente!"
 else
-    echo "❌ Error en el deploy"
+    echo "❌ Error creando/actualizando job"
     exit 1
 fi
 
