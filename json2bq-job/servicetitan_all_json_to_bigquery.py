@@ -67,7 +67,8 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
 
 def fix_json_format(local_path, temp_path):
     """Transforma el JSON a formato newline-delimited y snake_case.
-    Soporta tanto JSON array como newline-delimited JSON."""
+    Soporta tanto JSON array como newline-delimited JSON.
+    Convierte campos REPEATED (arrays) que vienen como NULL a arrays vacíos."""
     with open(local_path, 'r', encoding='utf-8') as f:
         first_char = f.read(1)
         f.seek(0)
@@ -79,9 +80,24 @@ def fix_json_format(local_path, temp_path):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
+    # Primera pasada: detectar campos que son arrays en al menos un registro
+    array_fields = set()
+    for item in json_data:
+        for key, value in item.items():
+            if isinstance(value, list):
+                array_fields.add(to_snake_case(key))
+    
+    # Segunda pasada: transformar y limpiar
     with open(temp_path, 'w', encoding='utf-8') as f:
         for item in json_data:
-            new_item = {to_snake_case(k): v for k, v in item.items()}
+            new_item = {}
+            for k, v in item.items():
+                snake_key = to_snake_case(k)
+                # Si el campo es un array conocido y viene como NULL, convertir a array vacío
+                if snake_key in array_fields and v is None:
+                    new_item[snake_key] = []
+                else:
+                    new_item[snake_key] = v
             f.write(json.dumps(new_item) + '\n')
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
@@ -319,9 +335,15 @@ def process_company(row):
             # Obtener esquema completo de staging (sin campos ETL)
             new_schema_fields = [col for col in staging_schema if col.name in new_cols]
             final_table = bq_client.get_table(table_ref_final)
-            final_table.schema = list(final_table.schema) + new_schema_fields
+            
+            # Separar campos ETL del resto del esquema para mantenerlos al final
+            etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
+            non_etl_fields = [col for col in final_table.schema if not col.name.startswith('_etl_')]
+            
+            # Reconstruir esquema: campos normales + nuevas columnas + campos ETL
+            final_table.schema = non_etl_fields + new_schema_fields + etl_fields
             bq_client.update_table(final_table, ['schema'])
-            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)}")
+            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)} (campos ETL mantenidos al final)")
         
         # Construir UPDATE SET solo con columnas comunes (ahora incluye las nuevas)
         update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
