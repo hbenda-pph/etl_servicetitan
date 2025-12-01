@@ -259,57 +259,13 @@ def process_company(row):
             bq_client.create_dataset(dataset)
             print(f"🆕 Dataset {dataset_staging} creado en proyecto {project_id}")
         
-        # Detectar campos REPEATED dinámicamente: cargar primer registro a tabla temporal
-        temp_table_name = f"{table_staging}_schema_detect"
-        temp_table_ref = bq_client.dataset(dataset_staging).table(temp_table_name)
-        repeated_fields = set()
-        
-        try:
-            # Leer primer registro para detectar esquema
-            with open(temp_fixed, 'r', encoding='utf-8') as f:
-                first_line = f.readline()
-                if first_line.strip():
-                    temp_schema_file = f"/tmp/{project_id}_{endpoint}_schema.json"
-                    with open(temp_schema_file, 'w', encoding='utf-8') as sf:
-                        sf.write(first_line)
-                    
-                    # Cargar primer registro para detectar esquema
-                    temp_job_config = bigquery.LoadJobConfig(
-                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                        autodetect=True,
-                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-                    )
-                    temp_load_job = bq_client.load_table_from_file(
-                        open(temp_schema_file, "rb"),
-                        temp_table_ref,
-                        job_config=temp_job_config
-                    )
-                    temp_load_job.result()
-                    
-                    # Obtener esquema y detectar campos REPEATED
-                    temp_table = bq_client.get_table(temp_table_ref)
-                    for field in temp_table.schema:
-                        if field.mode == "REPEATED":
-                            repeated_fields.add(field.name)
-                    
-                    # Limpiar tabla temporal
-                    bq_client.delete_table(temp_table_ref, not_found_ok=True)
-                    os.remove(temp_schema_file)
-                    
-                    if repeated_fields:
-                        print(f"🔍 Campos REPEATED detectados: {sorted(repeated_fields)}")
-                        # Limpiar datos con campos REPEATED conocidos
-                        fix_json_format(temp_json, temp_fixed, repeated_fields=repeated_fields)
-                        print(f"🧹 Datos limpiados: NULL convertido a [] para campos REPEATED")
-        except Exception as e:
-            print(f"⚠️  No se pudo detectar esquema automáticamente: {str(e)}. Continuando sin limpieza de REPEATED.")
-        
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             autodetect=True,
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
         )
         
+        # Intentar cargar directamente
         try:
             load_job = bq_client.load_table_from_file(
                 open(temp_fixed, "rb"),
@@ -329,17 +285,62 @@ def process_company(row):
                 event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging}"
             )
         except Exception as e:
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint,
-                event_type="ERROR",
-                event_title="Error cargando a staging",
-                event_message=f"Error cargando a tabla staging: {str(e)}"
-            )
-            print(f"❌ Error cargando a tabla staging: {str(e)}")
-            continue
+            error_msg = str(e)
+            # Intentar extraer campo REPEATED del mensaje de error
+            # Formato: "Only optional fields can be set to NULL. Field: permissions; Value: NULL"
+            match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg)
+            
+            if match and 'Only optional fields can be set to NULL' in error_msg:
+                problematic_field = match.group(1)
+                print(f"🔍 Campo REPEATED detectado del error: {problematic_field}")
+                print(f"🧹 Limpiando datos: convirtiendo NULL a [] para campo {problematic_field}")
+                
+                # Limpiar datos con el campo detectado
+                fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
+                
+                # Reintentar carga
+                try:
+                    load_job = bq_client.load_table_from_file(
+                        open(temp_fixed, "rb"),
+                        table_ref_staging,
+                        job_config=job_config
+                    )
+                    load_job.result()
+                    print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza)")
+                    
+                    log_event_bq(
+                        company_id=company_id,
+                        company_name=company_name,
+                        project_id=project_id,
+                        endpoint=endpoint,
+                        event_type="SUCCESS",
+                        event_title="Carga a staging exitosa (después de limpieza)",
+                        event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging} después de limpiar campo {problematic_field}"
+                    )
+                except Exception as retry_error:
+                    log_event_bq(
+                        company_id=company_id,
+                        company_name=company_name,
+                        project_id=project_id,
+                        endpoint=endpoint,
+                        event_type="ERROR",
+                        event_title="Error cargando a staging (después de limpieza)",
+                        event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
+                    )
+                    print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
+                    continue
+            else:
+                log_event_bq(
+                    company_id=company_id,
+                    company_name=company_name,
+                    project_id=project_id,
+                    endpoint=endpoint,
+                    event_type="ERROR",
+                    event_title="Error cargando a staging",
+                    event_message=f"Error cargando a tabla staging: {error_msg}"
+                )
+                print(f"❌ Error cargando a tabla staging: {error_msg}")
+                continue
         
         # Asegurar que la tabla final existe
         try:
