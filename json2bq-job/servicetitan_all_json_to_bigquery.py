@@ -65,10 +65,10 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
     except Exception as e:
         print(f"❌ Error en logging: {str(e)}")
 
-def fix_json_format(local_path, temp_path):
+def fix_json_format(local_path, temp_path, repeated_fields=None):
     """Transforma el JSON a formato newline-delimited y snake_case.
     Soporta tanto JSON array como newline-delimited JSON.
-    Convierte campos REPEATED (arrays) que vienen como NULL a arrays vacíos."""
+    Si se proporciona repeated_fields, convierte NULL a [] para esos campos."""
     with open(local_path, 'r', encoding='utf-8') as f:
         first_char = f.read(1)
         f.seek(0)
@@ -80,20 +80,25 @@ def fix_json_format(local_path, temp_path):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
-    # Primera pasada: detectar campos que son arrays en al menos un registro
-    array_fields = set()
+    # Detectar campos que son arrays en al menos un registro
+    detected_array_fields = set()
     for item in json_data:
         for key, value in item.items():
             if isinstance(value, list):
-                array_fields.add(to_snake_case(key))
+                detected_array_fields.add(to_snake_case(key))
     
-    # Segunda pasada: transformar y limpiar
+    # Combinar campos detectados con los proporcionados (si hay)
+    array_fields = detected_array_fields
+    if repeated_fields:
+        array_fields = array_fields | set(repeated_fields)
+    
+    # Transformar y limpiar
     with open(temp_path, 'w', encoding='utf-8') as f:
         for item in json_data:
             new_item = {}
             for k, v in item.items():
                 snake_key = to_snake_case(k)
-                # Si el campo es un array conocido y viene como NULL, convertir a array vacío
+                # Si el campo es un array y viene como NULL, convertir a array vacío
                 if snake_key in array_fields and v is None:
                     new_item[snake_key] = []
                 else:
@@ -219,7 +224,7 @@ def process_company(row):
             print(f"❌ Error descargando {json_filename}: {str(e)}")
             continue
         
-        # Transformar a newline-delimited y snake_case
+        # Transformar a newline-delimited y snake_case (primera pasada)
         try:
             fix_json_format(temp_json, temp_fixed)
             print(f"🔄 Transformado a newline-delimited y snake_case: {temp_fixed}")
@@ -253,6 +258,51 @@ def process_company(row):
             dataset.location = "US"
             bq_client.create_dataset(dataset)
             print(f"🆕 Dataset {dataset_staging} creado en proyecto {project_id}")
+        
+        # Detectar campos REPEATED dinámicamente: cargar primer registro a tabla temporal
+        temp_table_name = f"{table_staging}_schema_detect"
+        temp_table_ref = bq_client.dataset(dataset_staging).table(temp_table_name)
+        repeated_fields = set()
+        
+        try:
+            # Leer primer registro para detectar esquema
+            with open(temp_fixed, 'r', encoding='utf-8') as f:
+                first_line = f.readline()
+                if first_line.strip():
+                    temp_schema_file = f"/tmp/{project_id}_{endpoint}_schema.json"
+                    with open(temp_schema_file, 'w', encoding='utf-8') as sf:
+                        sf.write(first_line)
+                    
+                    # Cargar primer registro para detectar esquema
+                    temp_job_config = bigquery.LoadJobConfig(
+                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                        autodetect=True,
+                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+                    )
+                    temp_load_job = bq_client.load_table_from_file(
+                        open(temp_schema_file, "rb"),
+                        temp_table_ref,
+                        job_config=temp_job_config
+                    )
+                    temp_load_job.result()
+                    
+                    # Obtener esquema y detectar campos REPEATED
+                    temp_table = bq_client.get_table(temp_table_ref)
+                    for field in temp_table.schema:
+                        if field.mode == "REPEATED":
+                            repeated_fields.add(field.name)
+                    
+                    # Limpiar tabla temporal
+                    bq_client.delete_table(temp_table_ref, not_found_ok=True)
+                    os.remove(temp_schema_file)
+                    
+                    if repeated_fields:
+                        print(f"🔍 Campos REPEATED detectados: {sorted(repeated_fields)}")
+                        # Limpiar datos con campos REPEATED conocidos
+                        fix_json_format(temp_json, temp_fixed, repeated_fields=repeated_fields)
+                        print(f"🧹 Datos limpiados: NULL convertido a [] para campos REPEATED")
+        except Exception as e:
+            print(f"⚠️  No se pudo detectar esquema automáticamente: {str(e)}. Continuando sin limpieza de REPEATED.")
         
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
