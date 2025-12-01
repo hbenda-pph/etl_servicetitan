@@ -288,9 +288,10 @@ def process_company(row):
             error_msg = str(e)
             # Intentar extraer campo REPEATED del mensaje de error
             # Formato: "Only optional fields can be set to NULL. Field: permissions; Value: NULL"
-            match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg)
+            # Buscar el patrón de manera más flexible
+            match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
             
-            if match and 'Only optional fields can be set to NULL' in error_msg:
+            if match and ('Only optional fields can be set to NULL' in error_msg or 'NULL' in error_msg):
                 problematic_field = match.group(1)
                 print(f"🔍 Campo REPEATED detectado del error: {problematic_field}")
                 print(f"🧹 Limpiando datos: convirtiendo NULL a [] para campo {problematic_field}")
@@ -330,6 +331,11 @@ def process_company(row):
                     print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
                     continue
             else:
+                # Debug: mostrar qué se encontró
+                print(f"⚠️  No se pudo extraer campo del error. Mensaje: {error_msg[:200]}...")
+                if match:
+                    print(f"   Match encontrado pero condición no cumplida. Campo: {match.group(1)}")
+                
                 log_event_bq(
                     company_id=company_id,
                     company_name=company_name,
