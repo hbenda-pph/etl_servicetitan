@@ -303,19 +303,46 @@ def process_company(row):
             )
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
+        # Obtener esquemas de ambas tablas
+        staging_schema = bq_client.get_table(table_ref_staging).schema
+        final_schema = bq_client.get_table(table_ref_final).schema
+        
+        # Obtener nombres de columnas (excluyendo campos ETL y id)
+        staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
+        final_cols = {col.name for col in final_schema if col.name != 'id' and not col.name.startswith('_etl_')}
+        common_cols = staging_cols & final_cols  # Intersección: columnas en ambas tablas
+        new_cols = staging_cols - final_cols  # Columnas nuevas en staging que no están en final
+        
+        # Si hay columnas nuevas, agregarlas al esquema de la tabla final
+        if new_cols:
+            print(f"🆕 Columnas nuevas detectadas: {sorted(new_cols)}. Actualizando esquema de tabla final...")
+            # Obtener esquema completo de staging (sin campos ETL)
+            new_schema_fields = [col for col in staging_schema if col.name in new_cols]
+            final_table = bq_client.get_table(table_ref_final)
+            final_table.schema = list(final_table.schema) + new_schema_fields
+            bq_client.update_table(final_table, ['schema'])
+            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)}")
+        
+        # Construir UPDATE SET solo con columnas comunes (ahora incluye las nuevas)
+        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
+        
+        # Para INSERT, usar todas las columnas de staging (excepto ETL)
+        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
+        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
+        
         merge_sql = f'''
             MERGE `{project_id}.{dataset_final}.{table_final}` T
             USING `{project_id}.{dataset_staging}.{table_staging}` S
             ON T.id = S.id
             WHEN MATCHED THEN UPDATE SET 
-                {', '.join([f'T.{col.name} = S.{col.name}' for col in bq_client.get_table(table_ref_staging).schema if col.name != 'id'])},
+                {update_set},
                 T._etl_synced = CURRENT_TIMESTAMP(),
                 T._etl_operation = 'UPDATE'
             WHEN NOT MATCHED THEN INSERT (
-                {', '.join([col.name for col in bq_client.get_table(table_ref_staging).schema])},
+                {', '.join(insert_cols)},
                 _etl_synced, _etl_operation
             ) VALUES (
-                {', '.join([f'S.{col.name}' for col in bq_client.get_table(table_ref_staging).schema])},
+                {', '.join(insert_values)},
                 CURRENT_TIMESTAMP(), 'INSERT'
             )
             WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
