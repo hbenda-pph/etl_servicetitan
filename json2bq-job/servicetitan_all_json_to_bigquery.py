@@ -25,6 +25,7 @@ ENDPOINTS = [
     "jobs_timesheets",    
     "purchase-orders",
     "returns",
+    "vendors",
     "export_job-canceled-logs",
     "job-cancel-reasons"
 ]

@@ -22,6 +22,7 @@ ENDPOINTS = [
     ("payroll/v2/tenant", "jobs/timesheets"),
     ("inventory/v2/tenant", "purchase-orders"),
     ("inventory/v2/tenant", "returns"),
+    ("inventory/v2/tenant", "vendors"),    
     ("jpm/v2/tenant", "export/job-canceled-logs"),
     ("jpm/v2/tenant", "job-cancel-reasons")    
 ]
