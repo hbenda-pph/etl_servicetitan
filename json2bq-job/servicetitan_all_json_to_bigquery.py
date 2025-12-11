@@ -40,6 +40,27 @@ def to_snake_case(name):
     name = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
 
+# Función para normalizar nombres de tablas (convertir guiones y slashes a underscores)
+# Esto asegura consistencia con Fivetran y nombres únicos para metadata_consolidated_tables
+def normalize_table_name(endpoint):
+    """
+    Normaliza el nombre del endpoint a un nombre de tabla consistente.
+    Convierte guiones y slashes a underscores para mantener consistencia.
+    
+    Ejemplos:
+    - "business-units" -> "business_units"
+    - "job-types" -> "job_types"
+    - "jobs/timesheets" -> "jobs_timesheets"
+    - "export/job-canceled-logs" -> "export_job_canceled_logs"
+    """
+    # Reemplazar slashes y guiones con underscores
+    normalized = endpoint.replace("/", "_").replace("-", "_")
+    # Asegurar que no haya underscores múltiples consecutivos
+    normalized = re.sub(r'_+', '_', normalized)
+    # Eliminar underscores al inicio y final
+    normalized = normalized.strip('_')
+    return normalized
+
 def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=None, 
                 event_type="INFO", event_title="", event_message="", info=None):
     """Inserta un evento en la tabla de logs centralizada."""
@@ -180,9 +201,11 @@ def process_company(row):
     bucket = storage_client.bucket(bucket_name)
     
     for endpoint in ENDPOINTS:
-        json_filename = f"servicetitan_{endpoint}.json"
-        temp_json = f"/tmp/{project_id}_{endpoint}.json"
-        temp_fixed = f"/tmp/fixed_{project_id}_{endpoint}.json"
+        # Normalizar nombre de archivo para que coincida con el nombre usado en st2json
+        normalized_endpoint = normalize_table_name(endpoint)
+        json_filename = f"servicetitan_{normalized_endpoint}.json"
+        temp_json = f"/tmp/{project_id}_{normalized_endpoint}.json"
+        temp_fixed = f"/tmp/fixed_{project_id}_{normalized_endpoint}.json"
         
         # Log de inicio de procesamiento de endpoint
         log_event_bq(
@@ -246,8 +269,10 @@ def process_company(row):
         bq_client = bigquery.Client(project=project_id)
         dataset_staging = "staging"
         dataset_final = "bronze"
-        table_staging = endpoint
-        table_final = endpoint
+        # Usar el nombre ya normalizado (coincide con el nombre del archivo JSON)
+        table_name = normalized_endpoint
+        table_staging = table_name
+        table_final = table_name
         table_ref_staging = bq_client.dataset(dataset_staging).table(table_staging)
         table_ref_final = bq_client.dataset(dataset_final).table(table_final)
         
@@ -448,6 +473,10 @@ def process_company(row):
             # Formato: "Value of type STRUCT<...> cannot be assigned to T.address, which has type STRUCT<...>"
             struct_match = re.search(r'cannot be assigned to T\.(\w+), which has type STRUCT', error_msg)
             
+            # Detectar error de cambio de tipo de campo (INT64 vs STRING, etc.)
+            # Formato: "Value of type INT64 cannot be assigned to T.purchase_order_id, which has type STRING"
+            type_mismatch = re.search(r'Value of type (\w+) cannot be assigned to T\.(\w+), which has type (\w+)', error_msg)
+            
             if struct_match:
                 problematic_struct_field = struct_match.group(1)
                 print(f"🔍 Campo STRUCT con esquema incompatible detectado: {problematic_struct_field}")
@@ -521,6 +550,83 @@ def process_company(row):
                         info={"merge_sql": merge_sql}
                     )
                     print(f"❌ Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging")
+            elif type_mismatch:
+                # Campo cambió de tipo (ej: INT64 -> STRING)
+                new_type = type_mismatch.group(1)
+                problematic_field = type_mismatch.group(2)
+                old_type = type_mismatch.group(3)
+                
+                print(f"🔍 Campo con tipo incompatible detectado: {problematic_field} (staging: {new_type}, final: {old_type})")
+                print(f"🔧 Actualizando tipo de campo {problematic_field} en tabla final...")
+                
+                # Obtener el campo actualizado de staging
+                staging_table = bq_client.get_table(table_ref_staging)
+                final_table = bq_client.get_table(table_ref_final)
+                
+                # Encontrar el campo en staging
+                new_field = None
+                for field in staging_table.schema:
+                    if field.name == problematic_field:
+                        new_field = field
+                        break
+                
+                if new_field:
+                    # Reemplazar el campo en el esquema final
+                    updated_schema = []
+                    for field in final_table.schema:
+                        if field.name == problematic_field:
+                            updated_schema.append(new_field)
+                        elif not field.name.startswith('_etl_'):
+                            updated_schema.append(field)
+                    
+                    # Mantener campos ETL al final
+                    etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
+                    final_table.schema = updated_schema + etl_fields
+                    bq_client.update_table(final_table, ['schema'])
+                    print(f"✅ Tipo de campo {problematic_field} actualizado de {old_type} a {new_type}.")
+                    
+                    # Reintentar MERGE
+                    try:
+                        query_job = bq_client.query(merge_sql)
+                        query_job.result()
+                        print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
+                        
+                        bq_client.delete_table(table_ref_staging, not_found_ok=True)
+                        print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
+                        
+                        log_event_bq(
+                            company_id=company_id,
+                            company_name=company_name,
+                            project_id=project_id,
+                            endpoint=endpoint,
+                            event_type="SUCCESS",
+                            event_title="MERGE exitoso (después de actualizar tipo)",
+                            event_message=f"MERGE ejecutado exitosamente después de actualizar tipo de {problematic_field} de {old_type} a {new_type}"
+                        )
+                    except Exception as retry_error:
+                        log_event_bq(
+                            company_id=company_id,
+                            company_name=company_name,
+                            project_id=project_id,
+                            endpoint=endpoint,
+                            event_type="ERROR",
+                            event_title="Error en MERGE (después de actualizar tipo)",
+                            event_message=f"Error en MERGE después de actualizar tipo de {problematic_field}: {str(retry_error)}",
+                            info={"merge_sql": merge_sql}
+                        )
+                        print(f"❌ Error en MERGE después de actualizar tipo: {str(retry_error)}")
+                else:
+                    log_event_bq(
+                        company_id=company_id,
+                        company_name=company_name,
+                        project_id=project_id,
+                        endpoint=endpoint,
+                        event_type="ERROR",
+                        event_title="Error en MERGE",
+                        event_message=f"Error en MERGE: campo {problematic_field} no encontrado en staging. {error_msg}",
+                        info={"merge_sql": merge_sql}
+                    )
+                    print(f"❌ Error en MERGE: campo {problematic_field} no encontrado en staging")
             else:
                 log_event_bq(
                     company_id=company_id,

@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 import time
 import shutil
+import re
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -151,6 +152,27 @@ class ServiceTitanAuth:
         
         return total_records, continue_from
 
+# Función para normalizar nombres de tablas (convertir guiones y slashes a underscores)
+# Esto asegura consistencia con Fivetran y nombres únicos para metadata_consolidated_tables
+def normalize_table_name(endpoint):
+    """
+    Normaliza el nombre del endpoint a un nombre de tabla consistente.
+    Convierte guiones y slashes a underscores para mantener consistencia.
+    
+    Ejemplos:
+    - "business-units" -> "business_units"
+    - "job-types" -> "job_types"
+    - "jobs/timesheets" -> "jobs_timesheets"
+    - "export/job-canceled-logs" -> "export_job_canceled_logs"
+    """
+    # Reemplazar slashes y guiones con underscores
+    normalized = endpoint.replace("/", "_").replace("-", "_")
+    # Asegurar que no haya underscores múltiples consecutivos
+    normalized = re.sub(r'_+', '_', normalized)
+    # Eliminar underscores al inicio y final
+    normalized = normalized.strip('_')
+    return normalized
+
 def ensure_bucket_exists(project_id, region="US"):
     bucket_name = f"{project_id}_servicetitan"
     storage_client = storage.Client(project=project_id)
@@ -190,7 +212,8 @@ def process_company(row):
         print(f"\n🔄 Descargando endpoint: {api_data}")
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename_api_data = api_data.replace("/","_") 
+            # Normalizar nombre de archivo para consistencia (sin guiones, solo underscores)
+            filename_api_data = normalize_table_name(api_data)
             filename_ts = f"servicetitan_{filename_api_data}_{timestamp}.json"
             filename_alias = f"servicetitan_{filename_api_data}.json"
             
