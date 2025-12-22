@@ -13,25 +13,87 @@ PROJECT_SOURCE = "platform-partners-qua"
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
-# Endpoints a consultar
-ENDPOINTS = [
-    ("settings/v2/tenant", "business-units"),
-    ("jpm/v2/tenant/", "job-types"),
-    ("settings/v2/tenant", "technicians"),
-    ("settings/v2/tenant", "employees"),
-    ("marketing/v2/tenant", "campaigns"),
-    ("payroll/v2/tenant", "jobs/timesheets"),
-    ("inventory/v2/tenant", "purchase-orders"),
-    ("inventory/v2/tenant", "returns"),
-    ("inventory/v2/tenant", "vendors"),    
-    ("jpm/v2/tenant", "export/job-canceled-logs"),
-    ("jpm/v2/tenant", "job-cancel-reasons")    
-]
-# Endpoints deshabilitados temporalmente (causan OOM):
-#    ("payroll/v2/tenant", "payrolls"),    
-#    ("sales/v2/tenant", "estimates")
-#    ("timesheets/v2/tenant", "timesheets"),
-#    ("timesheets/v2/tenant", "activities"),
+# Configuración para tabla de metadata
+METADATA_PROJECT = "pph-central"
+METADATA_DATASET = "management"
+METADATA_TABLE = "metadata_consolidated_tables"
+
+def load_endpoints_from_metadata():
+    """
+    Carga los endpoints automáticamente desde metadata_consolidated_tables.
+    Construye las tuplas (api_url_base, api_data, table_name) desde la metadata.
+    
+    Returns:
+        Lista de tuplas [(api_url_base, api_data, table_name), ...]
+    """
+    try:
+        client = bigquery.Client(project=METADATA_PROJECT)
+        query = f"""
+            SELECT 
+                endpoint_metadata.module,
+                endpoint_metadata.version,
+                endpoint_metadata.prefix,
+                endpoint_metadata.name,
+                endpoint_metadata.endpoint_type,
+                table_name
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
+            WHERE endpoint_metadata IS NOT NULL
+              AND active = TRUE
+            ORDER BY endpoint_metadata.module, endpoint_metadata.name
+        """
+        
+        job_config = bigquery.QueryJobConfig()
+        
+        query_job = client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        endpoints = []
+        for row in results:
+            module = row.module
+            version = row.version
+            prefix = row.prefix if row.prefix else None
+            name = row.name
+            endpoint_type = row.endpoint_type if row.endpoint_type else "normal"
+            table_name = row.table_name
+            
+            # Construir api_url_base: {module}/{version}/tenant
+            api_url_base = f"{module}/{version}/tenant"
+            
+            # Construir api_data: si hay prefix, usar {prefix}/{name}, sino solo {name}
+            # api_data se usa para construir la URL de la API
+            if prefix:
+                api_data = f"{prefix}/{name}"
+            else:
+                api_data = name
+            
+            # Retornar tupla con (api_url_base, api_data, table_name)
+            # table_name se usa para nombrar archivos JSON y tablas
+            endpoints.append((api_url_base, api_data, table_name))
+            print(f"📋 Endpoint cargado: {api_url_base} / {api_data} → tabla: {table_name} (tipo: {endpoint_type})")
+        
+        print(f"✅ Total endpoints cargados desde metadata: {len(endpoints)}")
+        return endpoints
+        
+    except Exception as e:
+        print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
+        print(f"⚠️  Usando lista de endpoints por defecto (hardcoded)")
+        # Fallback a lista por defecto si hay error
+        return [
+            ("settings/v2/tenant", "business-units"),
+            ("jpm/v2/tenant", "job-types"),
+            ("settings/v2/tenant", "technicians"),
+            ("settings/v2/tenant", "employees"),
+            ("marketing/v2/tenant", "campaigns"),
+            ("payroll/v2/tenant", "jobs/timesheets"),
+            ("inventory/v2/tenant", "purchase-orders"),
+            ("inventory/v2/tenant", "returns"),
+            ("inventory/v2/tenant", "vendors"),
+            ("jpm/v2/tenant", "export/job-canceled-logs"),
+            ("jpm/v2/tenant", "job-cancel-reasons")
+        ]
+
+# Cargar endpoints automáticamente desde metadata
+ENDPOINTS = load_endpoints_from_metadata()
 
 
 # Clase de autenticación y descarga
@@ -152,24 +214,71 @@ class ServiceTitanAuth:
         
         return total_records, continue_from
 
-# Función para normalizar nombres de tablas (convertir guiones y slashes a underscores)
-# Esto asegura consistencia con Fivetran y nombres únicos para metadata_consolidated_tables
-def normalize_table_name(endpoint):
+# Cache para nombres de tablas (evita consultas repetidas)
+_table_name_cache = {}
+
+def get_standardized_table_name(endpoint):
     """
-    Normaliza el nombre del endpoint a un nombre de tabla consistente.
-    Convierte guiones y slashes a underscores para mantener consistencia.
+    Obtiene el nombre estandarizado de la tabla desde metadata_consolidated_tables.
+    Si no se encuentra en la tabla de metadata, usa normalización por defecto.
     
-    Ejemplos:
-    - "business-units" -> "business_units"
-    - "job-types" -> "job_types"
-    - "jobs/timesheets" -> "jobs_timesheets"
-    - "export/job-canceled-logs" -> "export_job_canceled_logs"
+    Args:
+        endpoint: Nombre del endpoint (ej: "business-units", "job-types")
+    
+    Returns:
+        Nombre estandarizado de la tabla
     """
-    # Reemplazar slashes y guiones con underscores
+    # Usar cache si ya se consultó antes
+    cache_key = endpoint
+    if cache_key in _table_name_cache:
+        return _table_name_cache[cache_key]
+    
+    try:
+        # Consultar tabla de metadata
+        client = bigquery.Client(project=METADATA_PROJECT)
+        # Consulta que busca por endpoint_metadata.name, retorna table_name directamente
+        query = f"""
+            SELECT table_name
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
+            WHERE endpoint_metadata.name = @endpoint
+            LIMIT 1
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("endpoint", "STRING", endpoint)
+            ]
+        )
+        
+        query_job = client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        if results:
+            table_name = results[0].table_name
+            _table_name_cache[cache_key] = table_name
+            print(f"📋 Tabla estandarizada desde metadata: {endpoint} -> {table_name}")
+            return table_name
+        else:
+            # Si no se encuentra en metadata, usar normalización por defecto
+            print(f"⚠️  Endpoint '{endpoint}' no encontrado en metadata, usando normalización por defecto")
+            normalized = _normalize_table_name_fallback(endpoint)
+            _table_name_cache[cache_key] = normalized
+            return normalized
+            
+    except Exception as e:
+        # En caso de error, usar normalización por defecto
+        print(f"⚠️  Error consultando metadata para '{endpoint}': {str(e)}. Usando normalización por defecto")
+        normalized = _normalize_table_name_fallback(endpoint)
+        _table_name_cache[cache_key] = normalized
+        return normalized
+
+def _normalize_table_name_fallback(endpoint):
+    """
+    Función de respaldo para normalizar nombres cuando no se encuentra en metadata.
+    Convierte guiones y slashes a underscores.
+    """
     normalized = endpoint.replace("/", "_").replace("-", "_")
-    # Asegurar que no haya underscores múltiples consecutivos
     normalized = re.sub(r'_+', '_', normalized)
-    # Eliminar underscores al inicio y final
     normalized = normalized.strip('_')
     return normalized
 
@@ -208,14 +317,13 @@ def process_company(row):
     # 2. Instanciar cliente ServiceTitan
     st_client = ServiceTitanAuth(app_id, client_id, client_secret, tenant_id, app_key)
     # 3. Descargar y subir datos de cada endpoint
-    for api_url_base, api_data in ENDPOINTS:
+    for api_url_base, api_data, table_name in ENDPOINTS:
         print(f"\n🔄 Descargando endpoint: {api_data}")
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Normalizar nombre de archivo para consistencia (sin guiones, solo underscores)
-            filename_api_data = normalize_table_name(api_data)
-            filename_ts = f"servicetitan_{filename_api_data}_{timestamp}.json"
-            filename_alias = f"servicetitan_{filename_api_data}.json"
+            # Usar table_name directamente desde metadata para nombrar archivos JSON
+            filename_ts = f"servicetitan_{table_name}_{timestamp}.json"
+            filename_alias = f"servicetitan_{table_name}.json"
             
             # Detectar si es endpoint export (usa from/continueFrom) o normal (usa page)
             if api_data.startswith("export/"):

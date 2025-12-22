@@ -15,49 +15,138 @@ LOGS_PROJECT = "platform-partners-des"
 LOGS_DATASET = "logs"
 LOGS_TABLE = "etl_servicetitan"
 
-# Endpoints y nombres de archivo a procesar
-ENDPOINTS = [
-    "business-units",
-    "job-types",
-    "technicians",
-    "employees",
-    "campaigns",
-    "jobs_timesheets",    
-    "purchase-orders",
-    "returns",
-    "vendors",
-    "export_job-canceled-logs",
-    "job-cancel-reasons"
-]
-# Endpoints deshabilitados temporalmente (causan OOM en st2json-job):
-#    "payrolls",
-#    "estimates",
-#    "timesheets",
-#    "activities",
+# Configuración para tabla de metadata
+METADATA_PROJECT = "pph-central"
+METADATA_DATASET = "management"
+METADATA_TABLE = "metadata_consolidated_tables"
+
+def load_endpoints_from_metadata():
+    """
+    Carga los endpoints automáticamente desde metadata_consolidated_tables.
+    Retorna tuplas (endpoint_name, table_name) donde:
+    - endpoint_name: endpoint_metadata.name (usado para logging)
+    - table_name: nombre de la tabla (usado para archivos JSON y tablas BigQuery)
+    
+    Returns:
+        Lista de tuplas [(endpoint_name, table_name), ...]
+    """
+    try:
+        client = bigquery.Client(project=METADATA_PROJECT)
+        query = f"""
+            SELECT 
+                endpoint_metadata.name,
+                table_name
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
+            WHERE endpoint_metadata IS NOT NULL
+              AND active = TRUE
+            ORDER BY endpoint_metadata.module, endpoint_metadata.name
+        """
+        
+        job_config = bigquery.QueryJobConfig()
+        
+        query_job = client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        endpoints = [(row.name, row.table_name) for row in results]
+        print(f"✅ Total endpoints cargados desde metadata: {len(endpoints)}")
+        return endpoints
+        
+    except Exception as e:
+        print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
+        print(f"⚠️  Usando lista de endpoints por defecto (hardcoded)")
+        # Fallback a lista por defecto si hay error
+        return [
+            "business-units",
+            "job-types",
+            "technicians",
+            "employees",
+            "campaigns",
+            "jobs_timesheets",
+            "purchase-orders",
+            "returns",
+            "vendors",
+            "export_job-canceled-logs",
+            "job-cancel-reasons"
+        ]
+
+# Cargar endpoints automáticamente desde metadata
+ENDPOINTS = load_endpoints_from_metadata()
 
 # Función para convertir a snake_case
 def to_snake_case(name):
     name = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
 
-# Función para normalizar nombres de tablas (convertir guiones y slashes a underscores)
-# Esto asegura consistencia con Fivetran y nombres únicos para metadata_consolidated_tables
-def normalize_table_name(endpoint):
+# Configuración para tabla de metadata
+METADATA_PROJECT = "pph-central"
+METADATA_DATASET = "management"
+METADATA_TABLE = "metadata_consolidated_tables"
+
+# Cache para nombres de tablas (evita consultas repetidas)
+_table_name_cache = {}
+
+def get_standardized_table_name(endpoint):
     """
-    Normaliza el nombre del endpoint a un nombre de tabla consistente.
-    Convierte guiones y slashes a underscores para mantener consistencia.
+    Obtiene el nombre estandarizado de la tabla desde metadata_consolidated_tables.
+    Si no se encuentra en la tabla de metadata, usa normalización por defecto.
     
-    Ejemplos:
-    - "business-units" -> "business_units"
-    - "job-types" -> "job_types"
-    - "jobs/timesheets" -> "jobs_timesheets"
-    - "export/job-canceled-logs" -> "export_job_canceled_logs"
+    Args:
+        endpoint: Nombre del endpoint (ej: "business-units", "job-types")
+    
+    Returns:
+        Nombre estandarizado de la tabla
     """
-    # Reemplazar slashes y guiones con underscores
+    # Usar cache si ya se consultó antes
+    cache_key = endpoint
+    if cache_key in _table_name_cache:
+        return _table_name_cache[cache_key]
+    
+    try:
+        # Consultar tabla de metadata
+        client = bigquery.Client(project=METADATA_PROJECT)
+        # Consulta que busca por endpoint_metadata.name, retorna table_name directamente
+        query = f"""
+            SELECT table_name
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
+            WHERE endpoint_metadata.name = @endpoint
+            LIMIT 1
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("endpoint", "STRING", endpoint)
+            ]
+        )
+        
+        query_job = client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        if results:
+            table_name = results[0].table_name
+            _table_name_cache[cache_key] = table_name
+            print(f"📋 Tabla estandarizada desde metadata: {endpoint} -> {table_name}")
+            return table_name
+        else:
+            # Si no se encuentra en metadata, usar normalización por defecto
+            print(f"⚠️  Endpoint '{endpoint}' no encontrado en metadata, usando normalización por defecto")
+            normalized = _normalize_table_name_fallback(endpoint)
+            _table_name_cache[cache_key] = normalized
+            return normalized
+            
+    except Exception as e:
+        # En caso de error, usar normalización por defecto
+        print(f"⚠️  Error consultando metadata para '{endpoint}': {str(e)}. Usando normalización por defecto")
+        normalized = _normalize_table_name_fallback(endpoint)
+        _table_name_cache[cache_key] = normalized
+        return normalized
+
+def _normalize_table_name_fallback(endpoint):
+    """
+    Función de respaldo para normalizar nombres cuando no se encuentra en metadata.
+    Convierte guiones y slashes a underscores.
+    """
     normalized = endpoint.replace("/", "_").replace("-", "_")
-    # Asegurar que no haya underscores múltiples consecutivos
     normalized = re.sub(r'_+', '_', normalized)
-    # Eliminar underscores al inicio y final
     normalized = normalized.strip('_')
     return normalized
 
@@ -200,22 +289,21 @@ def process_company(row):
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
     
-    for endpoint in ENDPOINTS:
-        # Normalizar nombre de archivo para que coincida con el nombre usado en st2json
-        normalized_endpoint = normalize_table_name(endpoint)
-        json_filename = f"servicetitan_{normalized_endpoint}.json"
-        temp_json = f"/tmp/{project_id}_{normalized_endpoint}.json"
-        temp_fixed = f"/tmp/fixed_{project_id}_{normalized_endpoint}.json"
+    for endpoint_name, table_name in ENDPOINTS:
+        # Usar table_name directamente desde metadata para archivos JSON y tablas
+        json_filename = f"servicetitan_{table_name}.json"
+        temp_json = f"/tmp/{project_id}_{table_name}.json"
+        temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
         # Log de inicio de procesamiento de endpoint
         log_event_bq(
             company_id=company_id,
             company_name=company_name,
             project_id=project_id,
-            endpoint=endpoint,
+            endpoint=endpoint_name,
             event_type="INFO",
             event_title="Inicio procesamiento endpoint",
-            event_message=f"Procesando endpoint {endpoint} para {company_name}"
+            event_message=f"Procesando endpoint {endpoint_name} (tabla: {table_name}) para {company_name}"
         )
         
         # Descargar archivo JSON del bucket
@@ -226,7 +314,7 @@ def process_company(row):
                     company_id=company_id,
                     company_name=company_name,
                     project_id=project_id,
-                    endpoint=endpoint,
+                    endpoint=endpoint_name,
                     event_type="WARNING",
                     event_title="Archivo no encontrado",
                     event_message=f"Archivo {json_filename} no encontrado en bucket {bucket_name}"
@@ -269,8 +357,7 @@ def process_company(row):
         bq_client = bigquery.Client(project=project_id)
         dataset_staging = "staging"
         dataset_final = "bronze"
-        # Usar el nombre ya normalizado (coincide con el nombre del archivo JSON)
-        table_name = normalized_endpoint
+        # Usar table_name directamente desde metadata (coincide con el nombre del archivo JSON)
         table_staging = table_name
         table_final = table_name
         table_ref_staging = bq_client.dataset(dataset_staging).table(table_staging)
@@ -338,7 +425,7 @@ def process_company(row):
                         company_id=company_id,
                         company_name=company_name,
                         project_id=project_id,
-                        endpoint=endpoint,
+                        endpoint=endpoint_name,
                         event_type="SUCCESS",
                         event_title="Carga a staging exitosa (después de limpieza)",
                         event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging} después de limpiar campo {problematic_field}"
@@ -348,7 +435,7 @@ def process_company(row):
                         company_id=company_id,
                         company_name=company_name,
                         project_id=project_id,
-                        endpoint=endpoint,
+                        endpoint=endpoint_name,
                         event_type="ERROR",
                         event_title="Error cargando a staging (después de limpieza)",
                         event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
@@ -360,7 +447,7 @@ def process_company(row):
                     company_id=company_id,
                     company_name=company_name,
                     project_id=project_id,
-                    endpoint=endpoint,
+                    endpoint=endpoint_name,
                     event_type="ERROR",
                     event_title="Error cargando a staging",
                     event_message=f"Error cargando a tabla staging: {error_msg}"
@@ -521,7 +608,7 @@ def process_company(row):
                             company_id=company_id,
                             company_name=company_name,
                             project_id=project_id,
-                            endpoint=endpoint,
+                            endpoint=endpoint_name,
                             event_type="SUCCESS",
                             event_title="MERGE exitoso (después de actualizar STRUCT)",
                             event_message=f"MERGE ejecutado exitosamente después de actualizar esquema de {problematic_struct_field}"
@@ -531,7 +618,7 @@ def process_company(row):
                             company_id=company_id,
                             company_name=company_name,
                             project_id=project_id,
-                            endpoint=endpoint,
+                            endpoint=endpoint_name,
                             event_type="ERROR",
                             event_title="Error en MERGE (después de actualizar STRUCT)",
                             event_message=f"Error en MERGE después de actualizar {problematic_struct_field}: {str(retry_error)}",
@@ -543,7 +630,7 @@ def process_company(row):
                         company_id=company_id,
                         company_name=company_name,
                         project_id=project_id,
-                        endpoint=endpoint,
+                        endpoint=endpoint_name,
                         event_type="ERROR",
                         event_title="Error en MERGE",
                         event_message=f"Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging. {error_msg}",
@@ -598,7 +685,7 @@ def process_company(row):
                             company_id=company_id,
                             company_name=company_name,
                             project_id=project_id,
-                            endpoint=endpoint,
+                            endpoint=endpoint_name,
                             event_type="SUCCESS",
                             event_title="MERGE exitoso (después de actualizar tipo)",
                             event_message=f"MERGE ejecutado exitosamente después de actualizar tipo de {problematic_field} de {old_type} a {new_type}"
@@ -608,7 +695,7 @@ def process_company(row):
                             company_id=company_id,
                             company_name=company_name,
                             project_id=project_id,
-                            endpoint=endpoint,
+                            endpoint=endpoint_name,
                             event_type="ERROR",
                             event_title="Error en MERGE (después de actualizar tipo)",
                             event_message=f"Error en MERGE después de actualizar tipo de {problematic_field}: {str(retry_error)}",
@@ -620,7 +707,7 @@ def process_company(row):
                         company_id=company_id,
                         company_name=company_name,
                         project_id=project_id,
-                        endpoint=endpoint,
+                        endpoint=endpoint_name,
                         event_type="ERROR",
                         event_title="Error en MERGE",
                         event_message=f"Error en MERGE: campo {problematic_field} no encontrado en staging. {error_msg}",
@@ -632,7 +719,7 @@ def process_company(row):
                     company_id=company_id,
                     company_name=company_name,
                     project_id=project_id,
-                    endpoint=endpoint,
+                    endpoint=endpoint_name,
                     event_type="ERROR",
                     event_title="Error en MERGE",
                     event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",

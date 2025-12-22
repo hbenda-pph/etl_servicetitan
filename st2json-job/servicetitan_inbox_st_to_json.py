@@ -3,6 +3,9 @@ from requests.auth import HTTPBasicAuth
 import json
 from datetime import datetime
 import os
+import time
+import shutil
+import re
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery para INBOX
@@ -10,15 +13,82 @@ PROJECT_SOURCE = "pph-inbox"
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
-# Endpoints a consultar (versión reducida para Free Trial)
-ENDPOINTS = [
-    ("jpm/v2/tenant/", "job-types"),
-    ("settings/v2/tenant", "technicians"),
-    ("marketing/v2/tenant", "campaigns"),
-    ("payroll/v2/tenant", "jobs/timesheets"),
-    ("inventory/v2/tenant", "purchase-orders"),
-    ("inventory/v2/tenant", "returns")
-]
+# Configuración para tabla de metadata
+METADATA_PROJECT = "pph-central"
+METADATA_DATASET = "management"
+METADATA_TABLE = "metadata_consolidated_tables"
+
+def load_endpoints_from_metadata():
+    """
+    Carga los endpoints automáticamente desde metadata_consolidated_tables.
+    Construye las tuplas (api_url_base, api_data, table_name) desde la metadata.
+    
+    Returns:
+        Lista de tuplas [(api_url_base, api_data, table_name), ...]
+    """
+    try:
+        client = bigquery.Client(project=METADATA_PROJECT)
+        query = f"""
+            SELECT 
+                endpoint_metadata.module,
+                endpoint_metadata.version,
+                endpoint_metadata.prefix,
+                endpoint_metadata.name,
+                endpoint_metadata.endpoint_type,
+                table_name
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
+            WHERE endpoint_metadata IS NOT NULL
+              AND active = TRUE
+            ORDER BY endpoint_metadata.module, endpoint_metadata.name
+        """
+        
+        job_config = bigquery.QueryJobConfig()
+        
+        query_job = client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        endpoints = []
+        for row in results:
+            module = row.module
+            version = row.version
+            prefix = row.prefix if row.prefix else None
+            name = row.name
+            endpoint_type = row.endpoint_type if row.endpoint_type else "normal"
+            table_name = row.table_name
+            
+            # Construir api_url_base: {module}/{version}/tenant
+            api_url_base = f"{module}/{version}/tenant"
+            
+            # Construir api_data: si hay prefix, usar {prefix}/{name}, sino solo {name}
+            # api_data se usa para construir la URL de la API
+            if prefix:
+                api_data = f"{prefix}/{name}"
+            else:
+                api_data = name
+            
+            # Retornar tupla con (api_url_base, api_data, table_name)
+            # table_name se usa para nombrar archivos JSON y tablas
+            endpoints.append((api_url_base, api_data, table_name))
+            print(f"📋 Endpoint cargado: {api_url_base} / {api_data} → tabla: {table_name} (tipo: {endpoint_type})")
+        
+        print(f"✅ Total endpoints cargados desde metadata: {len(endpoints)}")
+        return endpoints
+        
+    except Exception as e:
+        print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
+        print(f"⚠️  Usando lista de endpoints por defecto (hardcoded)")
+        # Fallback a lista por defecto si hay error
+        return [
+            ("jpm/v2/tenant", "job-types"),
+            ("settings/v2/tenant", "technicians"),
+            ("marketing/v2/tenant", "campaigns"),
+            ("payroll/v2/tenant", "jobs/timesheets"),
+            ("inventory/v2/tenant", "purchase-orders"),
+            ("inventory/v2/tenant", "returns")
+        ]
+
+# Cargar endpoints automáticamente desde metadata
+ENDPOINTS = load_endpoints_from_metadata()
 
 # Clase de autenticación y descarga
 class ServiceTitanAuth:
@@ -38,7 +108,14 @@ class ServiceTitanAuth:
             'tenant_id': tenant_id,
             'app_key': app_key
         }
+        self._token = None
+        self._token_time = 0
+
     def get_access_token(self):
+        # Renovar si pasaron más de 10 minutos
+        if self._token and (time.time() - self._token_time) < 600:
+            return self._token
+        
         response = requests.post(
             self.AUTH_URL,
             auth=HTTPBasicAuth(self.credentials['client_id'], self.credentials['client_secret']),
@@ -53,14 +130,18 @@ class ServiceTitanAuth:
             }
         )
         response.raise_for_status()
-        return response.json()['access_token']
+        self._token = response.json()['access_token']
+        self._token_time = time.time()
+        return self._token
     def get_data(self, api_url_base, api_data):
-        token = self.get_access_token()
-        tenant_id = self.credentials['tenant_id']
+        """Método estándar para endpoints pequeños - retorna lista en memoria"""
+        page_size = 5000
         all_data = []
         page = 1
-        page_size = 5000
+        
         while True:
+            token = self.get_access_token()
+            tenant_id = self.credentials['tenant_id']
             url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
             response = requests.get(
                 url,
@@ -71,12 +152,133 @@ class ServiceTitanAuth:
                 }
             )
             response.raise_for_status()
-            data = response.json()
-            all_data.extend(data.get("data", []))
-            if len(data.get("data", [])) < page_size:
+            page_items = response.json().get("data", [])
+            
+            if not page_items:
+                break
+            all_data.extend(page_items)
+            
+            if len(page_items) < page_size:
                 break
             page += 1
+        
         return all_data
+
+    def get_data_export(self, api_url_base, api_data, output_file, continue_from=None):
+        """Método para endpoints /export/ - usa from/continueFrom en vez de paginación"""
+        total_records = 0
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            while True:
+                token = self.get_access_token()
+                tenant_id = self.credentials['tenant_id']
+                
+                # Construir URL con o sin token de continuación
+                if continue_from:
+                    url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?from={continue_from}"
+                else:
+                    url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}"
+                
+                response = requests.get(url, headers={
+                    'Authorization': f'Bearer {token}',
+                    'ST-App-Id': self.credentials['app_id'],
+                    'ST-App-Key': self.credentials['app_key']
+                })
+                response.raise_for_status()
+                
+                result = response.json()
+                page_items = result.get("data", [])
+                continue_from = result.get("continueFrom")
+                has_more = result.get("hasMore", False)
+                
+                if not page_items:
+                    break
+                
+                # Escribir cada item como línea separada (newline-delimited)
+                for item in page_items:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+                
+                total_records += len(page_items)
+                #print(f"📄 Batch: {len(page_items)} registros (total: {total_records})")
+                
+                # Salir si no hay más datos
+                if not has_more or not continue_from:
+                    break
+        
+        return total_records, continue_from
+
+# Configuración para tabla de metadata
+METADATA_PROJECT = "pph-central"
+METADATA_DATASET = "management"
+METADATA_TABLE = "metadata_consolidated_tables"
+
+# Cache para nombres de tablas (evita consultas repetidas)
+_table_name_cache = {}
+
+def get_standardized_table_name(endpoint):
+    """
+    Obtiene el nombre estandarizado de la tabla desde metadata_consolidated_tables.
+    Si no se encuentra en la tabla de metadata, usa normalización por defecto.
+    
+    Args:
+        endpoint: Nombre del endpoint (ej: "business-units", "job-types")
+    
+    Returns:
+        Nombre estandarizado de la tabla
+    """
+    # Usar cache si ya se consultó antes
+    cache_key = endpoint
+    if cache_key in _table_name_cache:
+        return _table_name_cache[cache_key]
+    
+    try:
+        # Consultar tabla de metadata
+        client = bigquery.Client(project=METADATA_PROJECT)
+        # Consulta que busca por endpoint_metadata.name, retorna table_name directamente
+        query = f"""
+            SELECT table_name
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
+            WHERE endpoint_metadata.name = @endpoint
+            LIMIT 1
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("endpoint", "STRING", endpoint)
+            ]
+        )
+        
+        query_job = client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        if results:
+            table_name = results[0].table_name
+            _table_name_cache[cache_key] = table_name
+            print(f"📋 Tabla estandarizada desde metadata: {endpoint} -> {table_name}")
+            return table_name
+        else:
+            # Si no se encuentra en metadata, usar normalización por defecto
+            print(f"⚠️  Endpoint '{endpoint}' no encontrado en metadata, usando normalización por defecto")
+            normalized = _normalize_table_name_fallback(endpoint)
+            _table_name_cache[cache_key] = normalized
+            return normalized
+            
+    except Exception as e:
+        # En caso de error, usar normalización por defecto
+        print(f"⚠️  Error consultando metadata para '{endpoint}': {str(e)}. Usando normalización por defecto")
+        normalized = _normalize_table_name_fallback(endpoint)
+        _table_name_cache[cache_key] = normalized
+        return normalized
+
+def _normalize_table_name_fallback(endpoint):
+    """
+    Función de respaldo para normalizar nombres cuando no se encuentra en metadata.
+    Convierte guiones y slashes a underscores.
+    """
+    normalized = endpoint.replace("/", "_").replace("-", "_")
+    normalized = re.sub(r'_+', '_', normalized)
+    normalized = normalized.strip('_')
+    return normalized
 
 def ensure_bucket_exists(project_id, region="US"):
     bucket_name = f"{project_id}_servicetitan"
@@ -113,19 +315,34 @@ def process_company(row):
     # 2. Instanciar cliente ServiceTitan
     st_client = ServiceTitanAuth(app_id, client_id, client_secret, tenant_id, app_key)
     # 3. Descargar y subir datos de cada endpoint
-    for api_url_base, api_data in ENDPOINTS:
+    for api_url_base, api_data, table_name in ENDPOINTS:
         print(f"\n🔄 Descargando endpoint: {api_data}")
         try:
-            data = st_client.get_data(api_url_base, api_data)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename_api_data = api_data.replace("/","_") 
-            filename_ts = f"servicetitan_{filename_api_data}_{timestamp}.json"
-            filename_alias = f"servicetitan_{filename_api_data}.json"
-            # Guardar localmente ambos archivos
-            with open(filename_ts, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            with open(filename_alias, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            # Usar table_name directamente desde metadata para nombrar archivos JSON
+            filename_ts = f"servicetitan_{table_name}_{timestamp}.json"
+            filename_alias = f"servicetitan_{table_name}.json"
+            
+            # Detectar si es endpoint export (usa from/continueFrom) o normal (usa page)
+            if api_data.startswith("export/"):
+                # Endpoint EXPORT: usa continueFrom para paginación
+                #print(f"📤 [EXPORT MODE] Usando paginación con continueFrom")
+                total, continue_token = st_client.get_data_export(api_url_base, api_data, filename_alias)
+                print(f"📊 [EXPORT MODE] Total registros descargados: {total}")
+                if continue_token:
+                    print(f"🔖 [EXPORT MODE] Token para próxima ejecución: {continue_token}")
+                # Copiar para archivo con timestamp
+                shutil.copy2(filename_alias, filename_ts)
+            else:
+                # Endpoint NORMAL: carga en memoria con paginación page=
+                #print(f"📥 [NORMAL MODE] Usando paginación con page=")
+                data = st_client.get_data(api_url_base, api_data)
+                print(f"📊 [NORMAL MODE] Total registros descargados: {len(data)}")
+                with open(filename_ts, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                with open(filename_alias, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            
             # Subir ambos archivos al bucket
             upload_to_bucket(bucket_name, project_id, filename_ts, filename_ts)
             upload_to_bucket(bucket_name, project_id, filename_alias, filename_alias)
@@ -137,25 +354,30 @@ def process_company(row):
             print(f"❌ Error en endpoint {api_data}: {str(e)}")
 
 def main():
-    print("Conectando a BigQuery para obtener compañías INBOX...")
+    # INBOX: Trabaja con una sola compañía, no necesita iterar sobre companies
+    print("Conectando a BigQuery para obtener compañía INBOX...")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f"""
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_fivetran_status = TRUE
         ORDER BY company_id
+        LIMIT 1
     """
-    results = client.query(query).result()
-    total = 0
-    procesadas = 0
-    for row in results:
-        total += 1
-        try:
-            process_company(row)
-            procesadas += 1
-        except Exception as e:
-            print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
-    print(f"\n{'='*80}")
-    print(f"🏁 Resumen INBOX: {procesadas}/{total} compañías procesadas exitosamente.")
+    results = list(client.query(query).result())
+    
+    if not results:
+        print("❌ No se encontró ninguna compañía INBOX activa en la tabla companies.")
+        return
+    
+    # Procesar la única compañía INBOX
+    row = results[0]
+    try:
+        process_company(row)
+        print(f"\n{'='*80}")
+        print(f"🏁 Procesamiento INBOX completado exitosamente.")
+    except Exception as e:
+        print(f"❌ Error procesando compañía INBOX {row.company_name}: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main()
