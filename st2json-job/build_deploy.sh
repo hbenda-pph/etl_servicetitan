@@ -2,7 +2,7 @@
 
 # =============================================================================
 # SCRIPT DE BUILD & DEPLOY PARA ETL-ST2JSON-JOB (Cloud Run Job)
-# Multi-Environment: DES, QUA, PRO
+# Multi-Environment: DEV, QUA, PRO
 # =============================================================================
 
 set -e  # Salir si hay algún error
@@ -21,12 +21,12 @@ if [ -n "$1" ]; then
     ENVIRONMENT=$(echo "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]')  # Convertir a minúsculas
     
     # Validar ambiente
-    if [[ ! "$ENVIRONMENT" =~ ^(des|qua|pro)$ ]]; then
+    if [[ ! "$ENVIRONMENT" =~ ^(dev|qua|pro)$ ]]; then
         echo "❌ Error: Ambiente inválido '$ENVIRONMENT'"
-        echo "Uso: ./build_deploy.sh [des|qua|pro]"
+        echo "Uso: ./build_deploy.sh [dev|qua|pro]"
         echo ""
         echo "Ejemplos:"
-        echo "  ./build_deploy.sh des    # Deploy en DES (platform-partners-des)"
+        echo "  ./build_deploy.sh dev    # Deploy en DEV (platform-partners-des)"
         echo "  ./build_deploy.sh qua    # Deploy en QUA (platform-partners-qua)"
         echo "  ./build_deploy.sh pro    # Deploy en PRO (platform-partners-pro)"
         echo ""
@@ -39,8 +39,8 @@ else
     
     case "$CURRENT_PROJECT" in
         platform-partners-des)
-            ENVIRONMENT="des"
-            echo "✅ Detectado: DES (platform-partners-des)"
+            ENVIRONMENT="dev"
+            echo "✅ Detectado: DEV (platform-partners-des)"
             ;;
         platform-partners-qua)
             ENVIRONMENT="qua"
@@ -52,15 +52,15 @@ else
             ;;
         *)
             echo "⚠️  Proyecto activo: ${CURRENT_PROJECT}"
-            echo "⚠️  No se reconoce el proyecto. Usando DES por defecto."
-            ENVIRONMENT="des"
+            echo "⚠️  No se reconoce el proyecto. Usando DEV por defecto."
+            ENVIRONMENT="dev"
             ;;
     esac
 fi
 
 # Configuración según ambiente
 case "$ENVIRONMENT" in
-    des)
+    dev)
         PROJECT_ID="platform-partners-des"
         JOB_NAME="etl-st2json-job"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-des.iam.gserviceaccount.com"
@@ -183,12 +183,12 @@ echo "📋 Para ver detalles del Job:"
 echo "   gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID}"
 echo ""
 echo "🔄 Para deploy en otros ambientes:"
-echo "   ./build_deploy.sh des    # Deploy en DES (desarrollo)"
+echo "   ./build_deploy.sh dev    # Deploy en DEV (desarrollo)"
 echo "   ./build_deploy.sh qua    # Deploy en QUA (validación)"
 echo "   ./build_deploy.sh pro    # Deploy en PRO (producción)"
 echo ""
 echo "📝 Notas:"
-echo "   - DES: Para desarrollo y testing"
+echo "   - DEV: Para desarrollo y testing"
 echo "   - QUA: Para validación y QA"
 echo "   - PRO: Para producción con datos reales"
 echo ""
