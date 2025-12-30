@@ -30,16 +30,16 @@ def load_endpoints_from_metadata():
         client = bigquery.Client(project=METADATA_PROJECT)
         query = f"""
             SELECT 
-                endpoint_metadata.module,
-                endpoint_metadata.version,
-                endpoint_metadata.prefix,
-                endpoint_metadata.name,
-                endpoint_metadata.endpoint_type,
+                endpoint.module,
+                endpoint.version,
+                endpoint.submodule,
+                endpoint.name,
+                endpoint.endpoint_type,
                 table_name
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE endpoint_metadata IS NOT NULL
+            WHERE endpoint IS NOT NULL
               AND active = TRUE
-            ORDER BY endpoint_metadata.module, endpoint_metadata.name
+            ORDER BY endpoint.module, endpoint.name
         """
         
         job_config = bigquery.QueryJobConfig()
@@ -51,20 +51,26 @@ def load_endpoints_from_metadata():
         for row in results:
             module = row.module
             version = row.version
-            prefix = row.prefix if row.prefix else None
+            submodule = row.submodule if row.submodule else None
             name = row.name
             endpoint_type = row.endpoint_type if row.endpoint_type else "normal"
             table_name = row.table_name
             
             # Construir api_url_base: {module}/{version}/tenant
-            api_url_base = f"{module}/{version}/tenant"
+            # Limpiar cualquier barra al inicio/final
+            api_url_base = f"{module.strip('/')}/{version.strip('/')}/tenant"
             
-            # Construir api_data: si hay prefix, usar {prefix}/{name}, sino solo {name}
+            # Construir api_data: si hay submodule, usar {submodule}/{name}, sino solo {name}
             # api_data se usa para construir la URL de la API
-            if prefix:
-                api_data = f"{prefix}/{name}"
+            # NOTA: "tenant" es una variable multitenant, NO es un submodule
+            # Limpiar barras al inicio/final para evitar doble "/"
+            submodule_clean = submodule.strip('/') if submodule else None
+            name_clean = name.strip('/')
+            
+            if submodule_clean:
+                api_data = f"{submodule_clean}/{name_clean}"
             else:
-                api_data = name
+                api_data = name_clean
             
             # Retornar tupla con (api_url_base, api_data, table_name)
             # table_name se usa para nombrar archivos JSON y tablas
@@ -78,18 +84,19 @@ def load_endpoints_from_metadata():
         print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
         print(f"⚠️  Usando lista de endpoints por defecto (hardcoded)")
         # Fallback a lista por defecto si hay error
+        # Retornar tuplas de 3 elementos: (api_url_base, api_data, table_name)
         return [
-            ("settings/v2/tenant", "business-units"),
-            ("jpm/v2/tenant", "job-types"),
-            ("settings/v2/tenant", "technicians"),
-            ("settings/v2/tenant", "employees"),
-            ("marketing/v2/tenant", "campaigns"),
-            ("payroll/v2/tenant", "jobs/timesheets"),
-            ("inventory/v2/tenant", "purchase-orders"),
-            ("inventory/v2/tenant", "returns"),
-            ("inventory/v2/tenant", "vendors"),
-            ("jpm/v2/tenant", "export/job-canceled-logs"),
-            ("jpm/v2/tenant", "job-cancel-reasons")
+            ("settings/v2/tenant", "business-units", "business_unit"),
+            ("jpm/v2/tenant", "job-types", "job_type"),
+            ("settings/v2/tenant", "technicians", "technician"),
+            ("settings/v2/tenant", "employees", "employee"),
+            ("marketing/v2/tenant", "campaigns", "campaign"),
+            ("payroll/v2/tenant", "jobs/timesheets", "timesheet"),
+            ("inventory/v2/tenant", "purchase-orders", "purchase_order"),
+            ("inventory/v2/tenant", "returns", "return"),
+            ("inventory/v2/tenant", "vendors", "vendor"),
+            ("jpm/v2/tenant", "export/job-canceled-logs", "job_canceled_log"),
+            ("jpm/v2/tenant", "jobs/cancel-reasons", "job_cancel_reason")
         ]
 
 # Cargar endpoints automáticamente desde metadata
@@ -139,6 +146,39 @@ class ServiceTitanAuth:
         self._token = response.json()['access_token']
         self._token_time = time.time()
         return self._token
+    
+    def _build_api_url(self, api_url_base, api_data, query_params=None):
+        """
+        Construye la URL de la API de forma segura, evitando doble "/".
+        
+        Args:
+            api_url_base: Base de la URL (ej: "settings/v2/tenant")
+            api_data: Datos del endpoint (ej: "business-units" o "jobs/timesheets")
+            query_params: Diccionario con parámetros de query (opcional)
+        
+        Returns:
+            URL completa y limpia
+        """
+        # Limpiar barras al inicio/final de cada componente
+        base_url = self.BASE_API_URL.rstrip('/')
+        api_url_base = api_url_base.strip('/')
+        api_data = api_data.strip('/')
+        tenant_id = str(self.credentials['tenant_id']).strip('/')
+        
+        # Construir URL base sin doble "/"
+        url = f"{base_url}/{api_url_base}/{tenant_id}/{api_data}"
+        
+        # Limpiar cualquier doble "/" que pueda haber quedado
+        url = re.sub(r'/+', '/', url)
+        # Reemplazar "http:/" o "https:/" por "http://" o "https://"
+        url = re.sub(r'(https?):/', r'\1://', url)
+        
+        # Agregar query params si existen
+        if query_params:
+            query_string = '&'.join([f"{k}={v}" for k, v in query_params.items()])
+            url = f"{url}?{query_string}"
+        
+        return url
 
     def get_data(self, api_url_base, api_data):
         """Método estándar para endpoints pequeños - retorna lista en memoria"""
@@ -148,8 +188,11 @@ class ServiceTitanAuth:
         
         while True:
             token = self.get_access_token()
-            tenant_id = self.credentials['tenant_id']
-            url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?page={page}&pageSize={page_size}&active=Any"
+            url = self._build_api_url(
+                api_url_base, 
+                api_data, 
+                query_params={'page': page, 'pageSize': page_size, 'active': 'Any'}
+            )
             response = requests.get(
                 url,
                 headers={
@@ -178,13 +221,16 @@ class ServiceTitanAuth:
         with open(output_file, 'w', encoding='utf-8') as f:
             while True:
                 token = self.get_access_token()
-                tenant_id = self.credentials['tenant_id']
                 
                 # Construir URL con o sin token de continuación
                 if continue_from:
-                    url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}?from={continue_from}"
+                    url = self._build_api_url(
+                        api_url_base, 
+                        api_data, 
+                        query_params={'from': continue_from}
+                    )
                 else:
-                    url = f"{self.BASE_API_URL}/{api_url_base}/{tenant_id}/{api_data}"
+                    url = self._build_api_url(api_url_base, api_data)
                 
                 response = requests.get(url, headers={
                     'Authorization': f'Bearer {token}',
@@ -236,11 +282,11 @@ def get_standardized_table_name(endpoint):
     try:
         # Consultar tabla de metadata
         client = bigquery.Client(project=METADATA_PROJECT)
-        # Consulta que busca por endpoint_metadata.name, retorna table_name directamente
+        # Consulta que busca por endpoint.name, retorna table_name directamente
         query = f"""
             SELECT table_name
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE endpoint_metadata.name = @endpoint
+            WHERE endpoint.name = @endpoint
             LIMIT 1
         """
         
