@@ -169,6 +169,54 @@ else
 fi
 
 echo ""
+echo "⏰ PASO 3: CONFIGURAR SCHEDULER (Solo para PRO)"
+echo "================================================"
+
+SCHEDULE_NAME="etl-json2bq-schedule"
+SCHEDULE_CRON="0 */6 * * *"  # Cada 6 horas
+
+if [ "$ENVIRONMENT" = "pro" ]; then
+    # Solo en producción: crear/actualizar scheduler
+    if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
+        echo "📝 Scheduler existe, actualizando..."
+        gcloud scheduler jobs update http ${SCHEDULE_NAME} \
+            --location=${REGION} \
+            --project=${PROJECT_ID} \
+            --schedule="${SCHEDULE_CRON}" \
+            --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+            --http-method=POST \
+            --oauth-service-account-email=${SERVICE_ACCOUNT} \
+            --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
+    else
+        echo "🆕 Scheduler no existe, creando..."
+        gcloud scheduler jobs create http ${SCHEDULE_NAME} \
+            --location=${REGION} \
+            --project=${PROJECT_ID} \
+            --schedule="${SCHEDULE_CRON}" \
+            --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+            --http-method=POST \
+            --oauth-service-account-email=${SERVICE_ACCOUNT} \
+            --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
+    fi
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Scheduler configurado exitosamente (cada 6 horas)"
+    else
+        echo "⚠️  Advertencia: Error configurando scheduler (puede que Cloud Scheduler API no esté habilitada)"
+    fi
+else
+    # En dev/qua: desactivar o eliminar scheduler si existe
+    if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
+        echo "⚠️  Scheduler encontrado en ambiente ${ENVIRONMENT^^}. Desactivando..."
+        gcloud scheduler jobs pause ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} 2>/dev/null || \
+        gcloud scheduler jobs delete ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} --quiet 2>/dev/null
+        echo "✅ Scheduler desactivado/eliminado (no debe ejecutarse en ${ENVIRONMENT^^})"
+    else
+        echo "✅ No hay scheduler configurado (correcto para ambiente ${ENVIRONMENT^^})"
+    fi
+fi
+
+echo ""
 echo "🎉 ¡DEPLOY COMPLETADO EXITOSAMENTE!"
 echo "===================================="
 echo ""
