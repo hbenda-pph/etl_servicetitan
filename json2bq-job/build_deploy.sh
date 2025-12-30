@@ -62,12 +62,12 @@ fi
 case "$ENVIRONMENT" in
     dev)
         PROJECT_ID="platform-partners-des"
-        JOB_NAME="etl-json2bq-job"
+        JOB_NAME="etl-json2bq-job-dev"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-des.iam.gserviceaccount.com"
         ;;
     qua)
         PROJECT_ID="platform-partners-qua"
-        JOB_NAME="etl-json2bq-job"
+        JOB_NAME="etl-json2bq-job-qua"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-qua.iam.gserviceaccount.com"
         ;;
     pro)
