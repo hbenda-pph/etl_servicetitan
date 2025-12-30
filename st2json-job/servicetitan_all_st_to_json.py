@@ -185,14 +185,20 @@ class ServiceTitanAuth:
         page_size = 5000
         all_data = []
         page = 1
+        use_active_param = True  # Intentar con active=Any primero
+        use_pagination = True  # Intentar con paginación primero
         
         while True:
             token = self.get_access_token()
-            url = self._build_api_url(
-                api_url_base, 
-                api_data, 
-                query_params={'page': page, 'pageSize': page_size, 'active': 'Any'}
-            )
+            
+            # Construir query params según el modo de intento
+            query_params = {}
+            if use_pagination:
+                query_params = {'page': page, 'pageSize': page_size}
+                if use_active_param:
+                    query_params['active'] = 'Any'
+            
+            url = self._build_api_url(api_url_base, api_data, query_params=query_params if query_params else None)
             response = requests.get(
                 url,
                 headers={
@@ -201,13 +207,56 @@ class ServiceTitanAuth:
                     'ST-App-Key': self.credentials['app_key']
                 }
             )
+            
+            # Manejo de errores 404: intentar diferentes combinaciones de parámetros
+            if response.status_code == 404 and page == 1:
+                if use_active_param and use_pagination:
+                    # Primera falla: intentar sin active=Any pero con paginación
+                    print(f"⚠️  Endpoint no acepta 'active=Any', reintentando sin ese parámetro...")
+                    use_active_param = False
+                    query_params = {'page': page, 'pageSize': page_size}
+                    url = self._build_api_url(api_url_base, api_data, query_params=query_params)
+                    response = requests.get(
+                        url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key']
+                        }
+                    )
+                elif use_pagination and response.status_code == 404:
+                    # Segunda falla: intentar sin paginación (sin parámetros)
+                    print(f"⚠️  Endpoint no acepta paginación, intentando sin parámetros...")
+                    use_pagination = False
+                    url = self._build_api_url(api_url_base, api_data, query_params=None)
+                    response = requests.get(
+                        url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key']
+                        }
+                    )
+            
             response.raise_for_status()
-            page_items = response.json().get("data", [])
+            result = response.json()
+            
+            # Algunos endpoints retornan directamente un array, otros tienen "data"
+            if isinstance(result, list):
+                page_items = result
+            else:
+                page_items = result.get("data", [])
             
             if not page_items:
                 break
+            
             all_data.extend(page_items)
             
+            # Si no estamos usando paginación, solo una llamada
+            if not use_pagination:
+                break
+            
+            # Si estamos usando paginación, verificar si hay más páginas
             if len(page_items) < page_size:
                 break
             page += 1
