@@ -49,6 +49,8 @@ METADATA_TABLE = "metadata_consolidated_tables"
 def load_endpoints_from_metadata():
     """
     Carga los endpoints automáticamente desde metadata_consolidated_tables.
+    Solo carga endpoints con silver_use_bronze = TRUE (endpoints que este ETL maneja,
+    diferenciándolos de los que maneja Fivetran).
     Retorna tuplas (endpoint_name, table_name) donde:
     - endpoint_name: endpoint.name (usado para logging)
     - table_name: nombre de la tabla (usado para archivos JSON y tablas BigQuery)
@@ -65,6 +67,7 @@ def load_endpoints_from_metadata():
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
             WHERE endpoint IS NOT NULL
               AND active = TRUE
+              AND silver_use_bronze = TRUE
             ORDER BY endpoint.module, endpoint.name
         """
         
