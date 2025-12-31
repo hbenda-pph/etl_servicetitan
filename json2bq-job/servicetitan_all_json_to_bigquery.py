@@ -68,7 +68,7 @@ def load_endpoints_from_metadata():
             WHERE endpoint IS NOT NULL
               AND active = TRUE
               AND silver_use_bronze = TRUE
-            ORDER BY endpoint.module, endpoint.name
+            ORDER BY table_name
         """
         
         job_config = bigquery.QueryJobConfig()
