@@ -5,17 +5,43 @@ from datetime import datetime, timezone
 from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
 
-# Configuración de BigQuery para la tabla de compañías
-PROJECT_SOURCE = "platform-partners-qua"
+# Configuración de BigQuery
+# Detectar proyecto automáticamente desde variable de entorno o metadata del service account
+def get_project_source():
+    """
+    Obtiene el proyecto del ambiente actual.
+    Prioridad:
+    1. Variable de entorno GCP_PROJECT (establecida por Cloud Run Jobs)
+    2. Variable de entorno GOOGLE_CLOUD_PROJECT
+    3. Proyecto por defecto del cliente BigQuery
+    4. Fallback hardcoded según ambiente detectado
+    """
+    # Cloud Run Jobs establece GCP_PROJECT automáticamente
+    project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
+    
+    if project:
+        return project
+    
+    # Si no hay variable de entorno, intentar detectar desde el cliente
+    try:
+        client = bigquery.Client()
+        return client.project
+    except:
+        pass
+    
+    # Fallback: detectar desde service account o usar default
+    return "platform-partners-qua"  # Fallback por defecto
+
+PROJECT_SOURCE = get_project_source()
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
-# Configuración para logging centralizado
-LOGS_PROJECT = "platform-partners-des"
+# Configuración para logging centralizado (usar proyecto detectado)
+LOGS_PROJECT = PROJECT_SOURCE
 LOGS_DATASET = "logs"
 LOGS_TABLE = "etl_servicetitan"
 
-# Configuración para tabla de metadata
+# Configuración para tabla de metadata (SIEMPRE centralizada en pph-central)
 METADATA_PROJECT = "pph-central"
 METADATA_DATASET = "management"
 METADATA_TABLE = "metadata_consolidated_tables"
@@ -24,7 +50,7 @@ def load_endpoints_from_metadata():
     """
     Carga los endpoints automáticamente desde metadata_consolidated_tables.
     Retorna tuplas (endpoint_name, table_name) donde:
-    - endpoint_name: endpoint_metadata.name (usado para logging)
+    - endpoint_name: endpoint.name (usado para logging)
     - table_name: nombre de la tabla (usado para archivos JSON y tablas BigQuery)
     
     Returns:
@@ -34,12 +60,12 @@ def load_endpoints_from_metadata():
         client = bigquery.Client(project=METADATA_PROJECT)
         query = f"""
             SELECT 
-                endpoint_metadata.name,
+                endpoint.name,
                 table_name
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE endpoint_metadata IS NOT NULL
+            WHERE endpoint IS NOT NULL
               AND active = TRUE
-            ORDER BY endpoint_metadata.module, endpoint_metadata.name
+            ORDER BY endpoint.module, endpoint.name
         """
         
         job_config = bigquery.QueryJobConfig()
@@ -55,18 +81,20 @@ def load_endpoints_from_metadata():
         print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
         print(f"⚠️  Usando lista de endpoints por defecto (hardcoded)")
         # Fallback a lista por defecto si hay error
+        # Retornar tuplas de 2 elementos: (endpoint_name, table_name)
+        # IMPORTANTE: table_name debe coincidir con el usado en st2json-job
         return [
-            "business-units",
-            "job-types",
-            "technicians",
-            "employees",
-            "campaigns",
-            "jobs_timesheets",
-            "purchase-orders",
-            "returns",
-            "vendors",
-            "export_job-canceled-logs",
-            "job-cancel-reasons"
+            ("business-units", "business_unit"),
+            ("job-types", "job_type"),
+            ("technicians", "technician"),
+            ("employees", "employee"),
+            ("campaigns", "campaign"),
+            ("jobs/timesheets", "timesheet"),
+            ("purchase-orders", "purchase_order"),
+            ("returns", "return"),
+            ("vendors", "vendor"),
+            ("export/job-canceled-logs", "job_canceled_log"),
+            ("jobs/cancel-reasons", "job_cancel_reason")
         ]
 
 # Cargar endpoints automáticamente desde metadata
@@ -104,11 +132,11 @@ def get_standardized_table_name(endpoint):
     try:
         # Consultar tabla de metadata
         client = bigquery.Client(project=METADATA_PROJECT)
-        # Consulta que busca por endpoint_metadata.name, retorna table_name directamente
+        # Consulta que busca por endpoint.name, retorna table_name directamente
         query = f"""
             SELECT table_name
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE endpoint_metadata.name = @endpoint
+            WHERE endpoint.name = @endpoint
             LIMIT 1
         """
         

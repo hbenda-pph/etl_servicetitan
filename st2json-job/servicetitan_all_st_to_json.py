@@ -9,11 +9,39 @@ import re
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
-PROJECT_SOURCE = "platform-partners-qua"
+# Detectar proyecto automáticamente desde variable de entorno o metadata del service account
+# Si no está disponible, usar el proyecto por defecto del cliente BigQuery
+def get_project_source():
+    """
+    Obtiene el proyecto del ambiente actual.
+    Prioridad:
+    1. Variable de entorno GCP_PROJECT (establecida por Cloud Run Jobs)
+    2. Variable de entorno GOOGLE_CLOUD_PROJECT
+    3. Proyecto por defecto del cliente BigQuery
+    4. Fallback hardcoded según ambiente detectado
+    """
+    # Cloud Run Jobs establece GCP_PROJECT automáticamente
+    project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
+    
+    if project:
+        return project
+    
+    # Si no hay variable de entorno, intentar detectar desde el cliente
+    try:
+        client = bigquery.Client()
+        return client.project
+    except:
+        pass
+    
+    # Fallback: detectar desde service account o usar default
+    # En Cloud Run, el service account tiene el formato: service@PROJECT.iam.gserviceaccount.com
+    return "platform-partners-qua"  # Fallback por defecto
+
+PROJECT_SOURCE = get_project_source()
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
-# Configuración para tabla de metadata
+# Configuración para tabla de metadata (SIEMPRE centralizada en pph-central)
 METADATA_PROJECT = "pph-central"
 METADATA_DATASET = "management"
 METADATA_TABLE = "metadata_consolidated_tables"
@@ -27,7 +55,10 @@ def load_endpoints_from_metadata():
         Lista de tuplas [(api_url_base, api_data, table_name), ...]
     """
     try:
+        # Crear cliente con proyecto pph-central (estándar del proyecto)
+        # El service account debe tener permisos en pph-central para consultar metadata
         client = bigquery.Client(project=METADATA_PROJECT)
+        
         query = f"""
             SELECT 
                 endpoint.module,
@@ -224,8 +255,21 @@ class ServiceTitanAuth:
                             'ST-App-Key': self.credentials['app_key']
                         }
                     )
-                elif use_pagination and response.status_code == 404:
-                    # Segunda falla: intentar sin paginación (sin parámetros)
+                    # Si sigue fallando, intentar sin paginación
+                    if response.status_code == 404 and use_pagination:
+                        print(f"⚠️  Endpoint no acepta paginación, intentando sin parámetros...")
+                        use_pagination = False
+                        url = self._build_api_url(api_url_base, api_data, query_params=None)
+                        response = requests.get(
+                            url,
+                            headers={
+                                'Authorization': f'Bearer {token}',
+                                'ST-App-Id': self.credentials['app_id'],
+                                'ST-App-Key': self.credentials['app_key']
+                            }
+                        )
+                elif use_pagination:
+                    # Si ya no usamos active=Any pero aún falla, intentar sin paginación
                     print(f"⚠️  Endpoint no acepta paginación, intentando sin parámetros...")
                     use_pagination = False
                     url = self._build_api_url(api_url_base, api_data, query_params=None)
@@ -451,6 +495,8 @@ def process_company(row):
             print(f"❌ Error en endpoint {api_data}: {str(e)}")
 
 def main():
+    print(f"🔍 Proyecto detectado para companies: {PROJECT_SOURCE}")
+    print(f"🔍 Proyecto para metadata: {METADATA_PROJECT}")
     print("Conectando a BigQuery para obtener compañías...")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f"""

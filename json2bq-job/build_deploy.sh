@@ -72,8 +72,9 @@ case "$ENVIRONMENT" in
         ;;
     pro)
         PROJECT_ID="platform-partners-pro"
+        PROJECT_ID_EMAIL="constant-height-455614-i0"  # Project ID para email de service account
         JOB_NAME="etl-json2bq-job"
-        SERVICE_ACCOUNT="etl-servicetitan@platform-partners-pro.iam.gserviceaccount.com"
+        SERVICE_ACCOUNT="etl-servicetitan@${PROJECT_ID_EMAIL}.iam.gserviceaccount.com"
         ;;
 esac
 
@@ -147,7 +148,8 @@ if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_I
         --memory ${MEMORY} \
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT}
+        --task-timeout ${TASK_TIMEOUT} \
+        --set-env-vars GCP_PROJECT=${PROJECT_ID}
 else
     echo "🆕 Job no existe, creando..."
     gcloud run jobs create ${JOB_NAME} \
@@ -158,7 +160,8 @@ else
         --memory ${MEMORY} \
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT}
+        --task-timeout ${TASK_TIMEOUT} \
+        --set-env-vars GCP_PROJECT=${PROJECT_ID}
 fi
 
 if [ $? -eq 0 ]; then
