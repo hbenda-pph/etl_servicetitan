@@ -359,7 +359,7 @@ def process_company(row):
                 company_id=company_id,
                 company_name=company_name,
                 project_id=project_id,
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 event_type="ERROR",
                 event_title="Error descargando archivo",
                 event_message=f"Error descargando {json_filename}: {str(e)}"
@@ -376,7 +376,7 @@ def process_company(row):
                 company_id=company_id,
                 company_name=company_name,
                 project_id=project_id,
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 event_type="ERROR",
                 event_title="Error transformando archivo",
                 event_message=f"Error transformando {json_filename}: {str(e)}"
@@ -423,7 +423,7 @@ def process_company(row):
                 company_id=company_id,
                 company_name=company_name,
                 project_id=project_id,
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 event_type="SUCCESS",
                 event_title="Carga a staging exitosa",
                 event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging}"
@@ -507,7 +507,7 @@ def process_company(row):
                 company_id=company_id,
                 company_name=company_name,
                 project_id=project_id,
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 event_type="INFO",
                 event_title="Tabla final creada",
                 event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente con campos ETL"
@@ -580,7 +580,7 @@ def process_company(row):
                 company_id=company_id,
                 company_name=company_name,
                 project_id=project_id,
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 event_type="SUCCESS",
                 event_title="MERGE exitoso",
                 event_message=f"MERGE con Soft Delete ejecutado exitosamente y tabla staging eliminada"
