@@ -329,15 +329,35 @@ class ServiceTitanAuth:
                 raise ValueError(error_msg)
             
             # Procesar respuesta exitosa con manejo de errores de JSON
-            # Usar response.content y luego decode para tener mejor control del encoding
+            # Leer response.content directamente (bytes crudos) para evitar cualquier
+            # procesamiento intermedio que pueda corromper caracteres escapados como \"
             try:
-                # Asegurar que el contenido esté completamente descargado
+                # Obtener el contenido como bytes crudos
                 response_content = response.content
-                # Decodificar usando el encoding de la respuesta, o UTF-8 por defecto
-                encoding = response.encoding or response.apparent_encoding or 'utf-8'
-                if encoding == 'ISO-8859-1':
-                    encoding = 'utf-8'  # A veces requests detecta mal el encoding
-                response_text = response_content.decode(encoding)
+                
+                # Verificar que el contenido esté completo comparando con Content-Length
+                content_length_header = response.headers.get('Content-Length')
+                if content_length_header:
+                    expected_size = int(content_length_header)
+                    actual_size = len(response_content)
+                    if actual_size < expected_size:
+                        error_msg = f"Respuesta truncada: esperados {expected_size} bytes, recibidos {actual_size} bytes"
+                        print(f"❌ {error_msg}")
+                        raise ValueError(error_msg)
+                
+                # Decodificar usando UTF-8 explícitamente
+                # NO usar response.text porque puede procesar caracteres de manera diferente
+                try:
+                    response_text = response_content.decode('utf-8')
+                except UnicodeDecodeError as decode_err:
+                    # Si UTF-8 falla, intentar con el encoding detectado por requests
+                    encoding = response.encoding or response.apparent_encoding or 'utf-8'
+                    if encoding == 'ISO-8859-1':
+                        encoding = 'utf-8'
+                    response_text = response_content.decode(encoding, errors='replace')
+                    print(f"⚠️  Advertencia: Se usó encoding '{encoding}' con reemplazo de errores")
+                
+                # Parsear JSON usando el texto decodificado
                 result = json.loads(response_text)
             except json.JSONDecodeError as e:
                 error_msg = f"Error parseando JSON: {str(e)}"
@@ -346,10 +366,28 @@ class ServiceTitanAuth:
                 print(f"❌ Status Code: {response.status_code}")
                 print(f"❌ Content-Type: {content_type}")
                 
+                # Si el error tiene información de posición, extraerla
+                if hasattr(e, 'pos') and e.pos:
+                    error_pos = e.pos
+                    print(f"❌ Posición del error en JSON: carácter {error_pos}")
+                
                 # Obtener el contenido para análisis
                 try:
-                    response_text = response.text
-                    response_size = len(response.content)
+                    # El contenido ya debería estar leído en response_content
+                    if 'response_content' in locals():
+                        response_size = len(response_content)
+                        try:
+                            response_text = response_content.decode('utf-8')
+                        except UnicodeDecodeError:
+                            response_text = response_content.decode('utf-8', errors='replace')
+                    else:
+                        # Si no está disponible, usar response.content directamente
+                        response_content = response.content
+                        response_size = len(response_content)
+                        try:
+                            response_text = response_content.decode('utf-8')
+                        except UnicodeDecodeError:
+                            response_text = response_content.decode('utf-8', errors='replace')
                     print(f"❌ Tamaño de respuesta: {response_size} bytes")
                     
                     # Verificar Content-Length
