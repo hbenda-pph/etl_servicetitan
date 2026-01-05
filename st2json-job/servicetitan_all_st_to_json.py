@@ -303,8 +303,40 @@ class ServiceTitanAuth:
             if not success:
                 response.raise_for_status()
             
-            # Procesar respuesta exitosa
-            result = response.json()
+            # Verificar que la respuesta sea JSON válido
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/json' not in content_type:
+                error_msg = f"Respuesta no es JSON (Content-Type: {content_type}). URL: {url}"
+                print(f"⚠️  {error_msg}")
+                # Intentar obtener el contenido para debugging
+                try:
+                    content_preview = response.text[:500] if response.text else "Respuesta vacía"
+                    print(f"⚠️  Contenido de respuesta (primeros 500 chars): {content_preview}")
+                except:
+                    pass
+                raise ValueError(error_msg)
+            
+            # Procesar respuesta exitosa con manejo de errores de JSON
+            try:
+                result = response.json()
+            except json.JSONDecodeError as e:
+                error_msg = f"Error parseando JSON: {str(e)}"
+                print(f"❌ {error_msg}")
+                print(f"❌ URL: {url}")
+                print(f"❌ Status Code: {response.status_code}")
+                print(f"❌ Content-Type: {content_type}")
+                print(f"❌ Tamaño de respuesta: {len(response.content)} bytes")
+                # Guardar primeros y últimos caracteres para debugging
+                try:
+                    text_content = response.text
+                    if len(text_content) > 1000:
+                        preview = text_content[:500] + "\n... [truncado] ...\n" + text_content[-500:]
+                    else:
+                        preview = text_content
+                    print(f"❌ Contenido de respuesta: {preview}")
+                except:
+                    print(f"❌ No se pudo obtener contenido de respuesta como texto")
+                raise ValueError(error_msg) from e
             
             # Algunos endpoints retornan directamente un array, otros tienen "data"
             if isinstance(result, list):
