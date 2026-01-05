@@ -417,57 +417,36 @@ def process_company(row):
     company_id = row.company_id
     company_name = row.company_name
     project_id = row.company_project_id
+    company_start_time = time.time()
     
-    # Log de inicio de procesamiento de compañía
-    log_event_bq(
-        company_id=company_id,
-        company_name=company_name,
-        project_id=project_id,
-        event_type="INFO",
-        event_title="Inicio procesamiento compañía",
-        event_message=f"Iniciando procesamiento de {company_name} (ID: {company_id})"
-    )
-    
+    # Log de inicio de procesamiento de compañía (solo una vez por compañía, no por endpoint)
     print(f"\n{'='*80}\n🏢 Procesando compañía: {company_name} (ID: {company_id}) | project_id: {project_id}")
     bucket_name = f"{project_id}_servicetitan"
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
     
     for endpoint_name, table_name in ENDPOINTS:
+        endpoint_start_time = time.time()
         # Usar table_name directamente desde metadata para archivos JSON y tablas
         json_filename = f"servicetitan_{table_name}.json"
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
-        # Log de inicio de procesamiento de endpoint
-        log_event_bq(
-            company_id=company_id,
-            company_name=company_name,
-            project_id=project_id,
-            endpoint=endpoint_name,
-            event_type="INFO",
-            event_title="Inicio procesamiento endpoint",
-            event_message=f"Procesando endpoint {endpoint_name} (tabla: {table_name}) para {company_name}"
-        )
+        print(f"\n📦 Endpoint: {endpoint_name} (tabla: {table_name})")
         
         # Descargar archivo JSON del bucket
         try:
+            download_start = time.time()
             blob = bucket.blob(json_filename)
             if not blob.exists():
-                log_event_bq(
-                    company_id=company_id,
-                    company_name=company_name,
-                    project_id=project_id,
-                    endpoint=endpoint_name,
-                    event_type="WARNING",
-                    event_title="Archivo no encontrado",
-                    event_message=f"Archivo {json_filename} no encontrado en bucket {bucket_name}"
-                )
                 print(f"⚠️  Archivo no encontrado: {json_filename} en bucket {bucket_name}")
                 continue
             blob.download_to_filename(temp_json)
-            print(f"⬇️  Descargado {json_filename} de gs://{bucket_name}")
+            download_time = time.time() - download_start
+            file_size_mb = os.path.getsize(temp_json) / (1024 * 1024)
+            print(f"⬇️  Descargado {json_filename} ({file_size_mb:.2f} MB) en {download_time:.1f}s")
         except Exception as e:
+            print(f"❌ Error descargando {json_filename}: {str(e)}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
@@ -477,14 +456,16 @@ def process_company(row):
                 event_title="Error descargando archivo",
                 event_message=f"Error descargando {json_filename}: {str(e)}"
             )
-            print(f"❌ Error descargando {json_filename}: {str(e)}")
             continue
         
         # Transformar a newline-delimited y snake_case (primera pasada)
         try:
+            transform_start = time.time()
             fix_json_format(temp_json, temp_fixed)
-            print(f"🔄 Transformado a newline-delimited y snake_case: {temp_fixed}")
+            transform_time = time.time() - transform_start
+            print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
         except Exception as e:
+            print(f"❌ Error transformando {json_filename}: {str(e)}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
@@ -494,10 +475,10 @@ def process_company(row):
                 event_title="Error transformando archivo",
                 event_message=f"Error transformando {json_filename}: {str(e)}"
             )
-            print(f"❌ Error transformando {json_filename}: {str(e)}")
             continue
         
         # Cargar a tabla staging en BigQuery
+        load_start = time.time()
         bq_client = bigquery.Client(project=project_id)
         dataset_staging = "staging"
         dataset_final = "bronze"
@@ -530,17 +511,8 @@ def process_company(row):
                 job_config=job_config
             )
             load_job.result()
-            print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging}")
-            
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="SUCCESS",
-                event_title="Carga a staging exitosa",
-                event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging}"
-            )
+            load_time = time.time() - load_start
+            print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} en {load_time:.1f}s")
         except Exception as e:
             error_msg = str(e)
             problematic_field = None
@@ -583,17 +555,8 @@ def process_company(row):
                         job_config=job_config
                     )
                     load_job.result()
-                    print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza)")
-                    
-                    log_event_bq(
-                        company_id=company_id,
-                        company_name=company_name,
-                        project_id=project_id,
-                        endpoint=endpoint_name,
-                        event_type="SUCCESS",
-                        event_title="Carga a staging exitosa (después de limpieza)",
-                        event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging} después de limpiar campo {problematic_field}"
-                    )
+                    load_time = time.time() - load_start
+                    print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza) en {load_time:.1f}s")
                 except Exception as retry_error:
                     log_event_bq(
                         company_id=company_id,
@@ -647,9 +610,14 @@ def process_company(row):
             )
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
+        merge_start = time.time()
         # OPTIMIZACIÓN: Obtener esquemas de ambas tablas en una sola operación cuando sea posible
+        schema_start = time.time()
         staging_table = bq_client.get_table(table_ref_staging)
         final_table = bq_client.get_table(table_ref_final)
+        schema_time = time.time() - schema_start
+        if schema_time > 1:
+            print(f"⏱️  Obtención de esquemas: {schema_time:.1f}s")
         staging_schema = staging_table.schema
         final_schema = final_table.schema
         
@@ -704,6 +672,7 @@ def process_company(row):
         insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
         insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
         
+        # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''
             MERGE `{project_id}.{dataset_final}.{table_final}` T
             USING `{project_id}.{dataset_staging}.{table_staging}` S
@@ -727,21 +696,20 @@ def process_company(row):
         try:
             query_job = bq_client.query(merge_sql)
             query_job.result()
-            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
+            merge_time = time.time() - merge_start
+            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
             
             # Solo borrar tabla staging si el MERGE fue exitoso
+            delete_start = time.time()
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
-            print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
+            delete_time = time.time() - delete_start
+            if delete_time > 0.5:
+                print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada en {delete_time:.1f}s")
+            else:
+                print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada")
             
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="SUCCESS",
-                event_title="MERGE exitoso",
-                event_message=f"MERGE con Soft Delete ejecutado exitosamente y tabla staging eliminada"
-            )
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
         except Exception as e:
             error_msg = str(e)
             # Detectar error de incompatibilidad de STRUCT
@@ -1094,15 +1062,11 @@ def process_company(row):
         except Exception:
             pass
     
-    # Log de fin de procesamiento de compañía
-    log_event_bq(
-        company_id=company_id,
-        company_name=company_name,
-        project_id=project_id,
-        event_type="SUCCESS",
-        event_title="Fin procesamiento compañía",
-        event_message=f"Procesamiento completado para {company_name}"
-    )
+    # Resumen de tiempo por compañía
+    company_elapsed = time.time() - company_start_time
+    print(f"\n{'='*80}")
+    print(f"✅ Compañía {company_name} completada en {company_elapsed:.1f} segundos ({company_elapsed/60:.1f} minutos)")
+    print(f"{'='*80}")
 
 def main():
     # Tiempo límite del job (40 minutos = 2400 segundos)
@@ -1118,6 +1082,7 @@ def main():
 
     print(f"\n{'='*80}")
     print("CONECTANDO A BigQuery PARA OBTENER COMPAÑÍAS...")
+    print(f"⏱️  Tiempo límite del job: {JOB_TIMEOUT_SECONDS // 60} minutos")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f'''
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
