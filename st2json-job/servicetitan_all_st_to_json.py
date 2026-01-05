@@ -239,10 +239,11 @@ class ServiceTitanAuth:
                     headers={
                         'Authorization': f'Bearer {token}',
                         'ST-App-Id': self.credentials['app_id'],
-                        'ST-App-Key': self.credentials['app_key']
+                        'ST-App-Key': self.credentials['app_key'],
+                        'Accept': 'application/json',
+                        'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
-                    stream=True  # Usar streaming para respuestas grandes
+                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
                 )
                 if response.status_code == 200:
                     success = True
@@ -260,10 +261,11 @@ class ServiceTitanAuth:
                     headers={
                         'Authorization': f'Bearer {token}',
                         'ST-App-Id': self.credentials['app_id'],
-                        'ST-App-Key': self.credentials['app_key']
+                        'ST-App-Key': self.credentials['app_key'],
+                        'Accept': 'application/json',
+                        'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
-                    stream=True  # Usar streaming para respuestas grandes
+                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
                 )
                 if response.status_code == 200:
                     success = True
@@ -280,10 +282,11 @@ class ServiceTitanAuth:
                     headers={
                         'Authorization': f'Bearer {token}',
                         'ST-App-Id': self.credentials['app_id'],
-                        'ST-App-Key': self.credentials['app_key']
+                        'ST-App-Key': self.credentials['app_key'],
+                        'Accept': 'application/json',
+                        'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
-                    stream=True  # Usar streaming para respuestas grandes
+                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
                 )
                 if response.status_code == 200:
                     success = True
@@ -299,10 +302,11 @@ class ServiceTitanAuth:
                     headers={
                         'Authorization': f'Bearer {token}',
                         'ST-App-Id': self.credentials['app_id'],
-                        'ST-App-Key': self.credentials['app_key']
+                        'ST-App-Key': self.credentials['app_key'],
+                        'Accept': 'application/json',
+                        'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
-                    stream=True  # Usar streaming para respuestas grandes
+                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
                 )
                 if response.status_code == 200:
                     success = True
@@ -324,59 +328,40 @@ class ServiceTitanAuth:
                     pass
                 raise ValueError(error_msg)
             
-            # Descargar contenido completo usando streaming para evitar truncamiento
-            # Con stream=True, debemos leer explícitamente el contenido
-            response_content = b''
-            try:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        response_content += chunk
-            except Exception as e:
-                print(f"⚠️  Error descargando contenido en chunks: {str(e)}")
-                # Fallback: intentar descargar directamente
-                response_content = response.content
-            
-            # Verificar que la respuesta esté completa (no truncada)
-            content_length_header = response.headers.get('Content-Length')
-            if content_length_header:
-                expected_size = int(content_length_header)
-                actual_size = len(response_content)
-                if actual_size < expected_size:
-                    error_msg = f"Respuesta truncada: esperados {expected_size} bytes, recibidos {actual_size} bytes"
-                    print(f"❌ {error_msg}")
-                    print(f"❌ URL: {url}")
-                    # Si es la primera página y el pageSize es grande, reducir y reintentar
-                    if page == 1 and page_size > 1000:
-                        print(f"⚠️  Reduciendo pageSize de {page_size} a 1000 y reintentando...")
-                        page_size = 1000
-                        continue  # Reintentar con pageSize reducido
-                    raise ValueError(error_msg)
-            
             # Procesar respuesta exitosa con manejo de errores de JSON
-            response_text = None
+            # Usar response.content y luego decode para tener mejor control del encoding
             try:
-                # Decodificar el contenido descargado
-                response_text = response_content.decode('utf-8')
+                # Asegurar que el contenido esté completamente descargado
+                response_content = response.content
+                # Decodificar usando el encoding de la respuesta, o UTF-8 por defecto
+                encoding = response.encoding or response.apparent_encoding or 'utf-8'
+                if encoding == 'ISO-8859-1':
+                    encoding = 'utf-8'  # A veces requests detecta mal el encoding
+                response_text = response_content.decode(encoding)
                 result = json.loads(response_text)
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            except json.JSONDecodeError as e:
                 error_msg = f"Error parseando JSON: {str(e)}"
                 print(f"❌ {error_msg}")
                 print(f"❌ URL: {url}")
                 print(f"❌ Status Code: {response.status_code}")
                 print(f"❌ Content-Type: {content_type}")
-                print(f"❌ Tamaño de respuesta: {len(response_content)} bytes")
-                if content_length_header:
-                    print(f"❌ Content-Length esperado: {content_length_header} bytes")
-                # Verificar si la respuesta parece truncada
+                
+                # Obtener el contenido para análisis
                 try:
-                    if response_text is None:
-                        # Intentar decodificar con diferentes encodings
-                        try:
-                            response_text = response_content.decode('utf-8', errors='replace')
-                        except:
-                            response_text = response_content.decode('latin-1', errors='replace')
+                    response_text = response.text
+                    response_size = len(response.content)
+                    print(f"❌ Tamaño de respuesta: {response_size} bytes")
                     
-                    # Verificar si termina abruptamente (sin cerrar JSON)
+                    # Verificar Content-Length
+                    content_length_header = response.headers.get('Content-Length')
+                    if content_length_header:
+                        expected_size = int(content_length_header)
+                        if response_size < expected_size:
+                            print(f"❌ Content-Length esperado: {expected_size} bytes (faltan {expected_size - response_size} bytes)")
+                        else:
+                            print(f"✅ Content-Length coincide: {expected_size} bytes")
+                    
+                    # Verificar si la respuesta parece truncada
                     if response_text and not response_text.rstrip().endswith('}') and not response_text.rstrip().endswith(']'):
                         print(f"⚠️  La respuesta parece estar truncada (no termina con '}}' o ']')")
                         # Contar llaves y corchetes para ver si están balanceados
@@ -384,25 +369,16 @@ class ServiceTitanAuth:
                         open_brackets = response_text.count('[') - response_text.count(']')
                         if open_braces > 0 or open_brackets > 0:
                             print(f"⚠️  JSON no balanceado: {open_braces} llaves abiertas, {open_brackets} corchetes abiertos")
-                            # Si es la primera página y el pageSize es grande, reducir y reintentar
-                            if page == 1 and page_size > 1000:
-                                print(f"⚠️  Reduciendo pageSize de {page_size} a 1000 y reintentando...")
-                                page_size = 1000
-                                continue  # Reintentar con pageSize reducido
-                except Exception as decode_error:
-                    print(f"⚠️  Error al analizar respuesta: {str(decode_error)}")
-                # Guardar primeros y últimos caracteres para debugging
-                try:
-                    if response_text:
-                        if len(response_text) > 1000:
-                            preview = response_text[:500] + "\n... [truncado] ...\n" + response_text[-500:]
-                        else:
-                            preview = response_text
-                        print(f"❌ Contenido de respuesta: {preview}")
+                    
+                    # Guardar primeros y últimos caracteres para debugging
+                    if len(response_text) > 1000:
+                        preview = response_text[:500] + "\n... [truncado] ...\n" + response_text[-500:]
                     else:
-                        print(f"❌ No se pudo decodificar contenido de respuesta")
-                except:
-                    print(f"❌ No se pudo obtener contenido de respuesta como texto")
+                        preview = response_text
+                    print(f"❌ Contenido de respuesta: {preview}")
+                except Exception as decode_error:
+                    print(f"❌ No se pudo obtener contenido de respuesta: {str(decode_error)}")
+                
                 raise ValueError(error_msg) from e
             
             # Algunos endpoints retornan directamente un array, otros tienen "data"
