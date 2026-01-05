@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 from datetime import datetime, timezone
 from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
@@ -1104,29 +1105,75 @@ def process_company(row):
     )
 
 def main():
+    # Tiempo límite del job (40 minutos = 2400 segundos)
+    JOB_TIMEOUT_SECONDS = 40 * 60
+    start_time = time.time()
+    
     # Log de inicio del proceso ETL
     log_event_bq(
         event_type="INFO",
         event_title="Inicio proceso ETL",
         event_message="Iniciando proceso ETL de ServiceTitan para todas las compañías activas"
     )
-    
-    print("Conectando a BigQuery para obtener compañías...")
+
+    print(f"\n{'='*80}")
+    print("CONECTANDO A BigQuery PARA OBTENER COMPAÑÍAS...")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f'''
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_bigquery_status = TRUE
         ORDER BY company_id
     '''
-    results = client.query(query).result()
-    total = 0
+    results = list(client.query(query).result())  # Convertir a lista para poder contar
+    total = len(results)
     procesadas = 0
+    start_company_time = start_time
     
-    for row in results:
-        total += 1
+    print(f"📊 Total de compañías a procesar: {total}")
+    print(f"{'='*80}\n")
+    
+    for idx, row in enumerate(results, 1):
+        # Verificar tiempo transcurrido antes de procesar cada compañía
+        elapsed_time = time.time() - start_time
+        remaining_time = JOB_TIMEOUT_SECONDS - elapsed_time
+        
+        # Si quedan menos de 5 minutos, loguear advertencia
+        if remaining_time < 300:  # 5 minutos
+            print(f"⚠️  ADVERTENCIA: Quedan {remaining_time // 60:.1f} minutos antes del timeout")
+            log_event_bq(
+                event_type="WARNING",
+                event_title="Advertencia de timeout",
+                event_message=f"Quedan {remaining_time // 60:.1f} minutos antes del timeout. Procesando compañía {idx}/{total}: {row.company_name}"
+            )
+        
+        # Si el tiempo se agotó, lanzar excepción con mensaje claro
+        if elapsed_time >= JOB_TIMEOUT_SECONDS:
+            elapsed_minutes = elapsed_time / 60
+            log_event_bq(
+                event_type="ERROR",
+                event_title="Timeout del job",
+                event_message=f"Job interrumpido por timeout después de {elapsed_minutes:.1f} minutos. Procesadas {procesadas}/{total} compañías. Última compañía procesada: {row.company_name if idx > 1 else 'ninguna'}"
+            )
+            print(f"\n{'='*80}")
+            print(f"⏱️  TIMEOUT: Job interrumpido después de {elapsed_minutes:.1f} minutos")
+            print(f"📊 Progreso: {procesadas}/{total} compañías procesadas exitosamente")
+            print(f"🔄 El job se reiniciará automáticamente desde el inicio")
+            print(f"{'='*80}")
+            raise TimeoutError(f"Job timeout después de {elapsed_minutes:.1f} minutos. Procesadas {procesadas}/{total} compañías.")
+        
+        # Log del progreso
+        elapsed_minutes = elapsed_time / 60
+        print(f"\n📊 Progreso: Compañía {idx}/{total} | Tiempo transcurrido: {elapsed_minutes:.1f} min | Restante: {remaining_time // 60:.1f} min")
+        
         try:
+            company_start_time = time.time()
             process_company(row)
             procesadas += 1
+            company_elapsed = time.time() - company_start_time
+            print(f"✅ Compañía {row.company_name} procesada en {company_elapsed:.1f} segundos")
+        except TimeoutError:
+            # Re-lanzar timeout para que se propague
+            raise
         except Exception as e:
             log_event_bq(
                 company_id=row.company_id,
@@ -1137,16 +1184,20 @@ def main():
                 event_message=f"Error procesando compañía {row.company_name}: {str(e)}"
             )
             print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
+            # Continuar con la siguiente compañía
     
     # Log de fin del proceso ETL
+    total_time = time.time() - start_time
+    total_minutes = total_time / 60
     log_event_bq(
         event_type="SUCCESS",
         event_title="Fin proceso ETL",
-        event_message=f"Proceso ETL completado. {procesadas}/{total} compañías procesadas exitosamente."
+        event_message=f"Proceso ETL completado. {procesadas}/{total} compañías procesadas exitosamente en {total_minutes:.1f} minutos."
     )
     
     print(f"\n{'='*80}")
-    print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
+    print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente en {total_minutes:.1f} minutos.")
+    print(f"{'='*80}")
 
 if __name__ == "__main__":
     main()
