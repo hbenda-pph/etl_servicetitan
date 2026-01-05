@@ -207,10 +207,52 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
     except Exception as e:
         print(f"❌ Error en logging: {str(e)}")
 
+def fix_nested_value(value, field_path="", known_array_fields=None):
+    """Función recursiva para corregir valores anidados.
+    Convierte objetos a arrays cuando el campo debería ser array (ej: serialNumbers)."""
+    if known_array_fields is None:
+        known_array_fields = set()
+    
+    # Si es None, retornar None (se manejará después)
+    if value is None:
+        return None
+    
+    # Si es un diccionario/objeto
+    if isinstance(value, dict):
+        # Verificar si este campo debería ser un array (por nombre común)
+        # serialNumbers, serial_numbers, etc. deberían ser arrays
+        field_name_lower = field_path.lower() if field_path else ""
+        if 'serial' in field_name_lower and 'number' in field_name_lower:
+            # Si es un objeto pero debería ser array, convertir a array vacío
+            return []
+        
+        # Si no, procesar recursivamente
+        fixed_dict = {}
+        for k, v in value.items():
+            snake_key = to_snake_case(k)
+            nested_path = f"{field_path}.{snake_key}" if field_path else snake_key
+            
+            # Verificar si este campo anidado debería ser array pero viene como objeto
+            nested_field_lower = nested_path.lower()
+            if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
+                # Convertir objeto a array vacío
+                fixed_dict[snake_key] = []
+            else:
+                fixed_dict[snake_key] = fix_nested_value(v, nested_path, known_array_fields)
+        return fixed_dict
+    
+    # Si es una lista, procesar cada elemento
+    if isinstance(value, list):
+        return [fix_nested_value(item, field_path, known_array_fields) for item in value]
+    
+    # Para otros tipos, retornar tal cual
+    return value
+
 def fix_json_format(local_path, temp_path, repeated_fields=None):
     """Transforma el JSON a formato newline-delimited y snake_case.
     Soporta tanto JSON array como newline-delimited JSON.
-    Si se proporciona repeated_fields, convierte NULL a [] para esos campos."""
+    Si se proporciona repeated_fields, convierte NULL a [] para esos campos.
+    También corrige campos anidados que deberían ser arrays pero vienen como objetos."""
     with open(local_path, 'r', encoding='utf-8') as f:
         first_char = f.read(1)
         f.seek(0)
@@ -222,7 +264,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
-    # Detectar campos que son arrays en al menos un registro
+    # Detectar campos que son arrays en al menos un registro (nivel superior)
     detected_array_fields = set()
     for item in json_data:
         for key, value in item.items():
@@ -240,11 +282,15 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             new_item = {}
             for k, v in item.items():
                 snake_key = to_snake_case(k)
+                
+                # Procesar recursivamente para corregir campos anidados
+                fixed_value = fix_nested_value(v, snake_key, array_fields)
+                
                 # Si el campo es un array y viene como NULL, convertir a array vacío
-                if snake_key in array_fields and v is None:
+                if snake_key in array_fields and fixed_value is None:
                     new_item[snake_key] = []
                 else:
-                    new_item[snake_key] = v
+                    new_item[snake_key] = fixed_value
             f.write(json.dumps(new_item) + '\n')
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
@@ -430,17 +476,33 @@ def process_company(row):
             )
         except Exception as e:
             error_msg = str(e)
+            problematic_field = None
+            needs_fix = False
+            
             # Intentar extraer campo REPEATED del mensaje de error
-            # Formato: "Field: permissions; Value: NULL" (puede estar en cualquier parte del mensaje)
+            # Formato 1: "Field: permissions; Value: NULL" (puede estar en cualquier parte del mensaje)
             match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
+            
+            # Formato 2: "JSON object specified for non-record field: items.serialNumbers"
+            # Este error indica que un campo que debería ser array viene como objeto
+            match2 = re.search(r'non-record field:\s*([\w.]+)', error_msg, re.IGNORECASE)
             
             if match:
                 problematic_field = match.group(1)
+                needs_fix = True
                 print(f"🔍 Campo REPEATED detectado del error: {problematic_field}")
                 print(f"🧹 Limpiando datos: convirtiendo NULL a [] para campo {problematic_field}")
-                
+            elif match2:
+                problematic_field = match2.group(1)
+                needs_fix = True
+                print(f"🔍 Campo anidado con tipo incorrecto detectado: {problematic_field}")
+                print(f"🧹 Limpiando datos: corrigiendo campo {problematic_field} que viene como objeto pero debería ser array")
+            
+            if needs_fix and problematic_field:
                 # Limpiar datos con el campo detectado
-                fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
+                # Si es un campo anidado (ej: items.serialNumbers), extraer solo el nombre del campo
+                field_name = problematic_field.split('.')[-1] if '.' in problematic_field else problematic_field
+                fix_json_format(temp_json, temp_fixed, repeated_fields={field_name})
                 
                 # Reintentar carga
                 try:
