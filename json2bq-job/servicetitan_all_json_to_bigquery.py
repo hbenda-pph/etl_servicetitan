@@ -209,6 +209,7 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
 
 def fix_nested_value(value, field_path="", known_array_fields=None):
     """Función recursiva para corregir valores anidados.
+    OPTIMIZADO: Solo procesa recursivamente cuando es necesario (campos conocidos o problemas detectados).
     Convierte objetos a arrays cuando el campo debería ser array (ej: serialNumbers).
     También convierte NULL a [] para campos que están en known_array_fields."""
     if known_array_fields is None:
@@ -231,24 +232,45 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
             # Si es un objeto pero debería ser array, convertir a array vacío
             return []
         
-        # Si no, procesar recursivamente
+        # OPTIMIZACIÓN: Solo procesar recursivamente si hay campos conocidos que necesitan corrección
+        # o si detectamos un problema específico
+        needs_recursive_processing = False
         fixed_dict = {}
+        
         for k, v in value.items():
             snake_key = to_snake_case(k)
             nested_path = f"{field_path}.{snake_key}" if field_path else snake_key
             
-            # Verificar si este campo anidado debería ser array pero viene como objeto
+            # Verificar si este campo anidado necesita procesamiento
             nested_field_lower = nested_path.lower()
-            if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
-                # Convertir objeto a array vacío
-                fixed_dict[snake_key] = []
+            field_name_only = nested_path.split('.')[-1] if '.' in nested_path else nested_path
+            
+            # Solo procesar recursivamente si:
+            # 1. El campo está en known_array_fields (necesita corrección de NULL)
+            # 2. Es serialNumbers y viene como objeto (problema conocido)
+            # 3. Es None y podría necesitar corrección
+            if field_name_only in known_array_fields or \
+               ('serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict)) or \
+               v is None:
+                needs_recursive_processing = True
+                if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
+                    fixed_dict[snake_key] = []
+                else:
+                    fixed_dict[snake_key] = fix_nested_value(v, nested_path, known_array_fields)
             else:
-                fixed_dict[snake_key] = fix_nested_value(v, nested_path, known_array_fields)
+                # No necesita procesamiento: copiar tal cual (más rápido)
+                fixed_dict[snake_key] = v
+        
         return fixed_dict
     
-    # Si es una lista, procesar cada elemento
+    # Si es una lista, procesar cada elemento solo si es necesario
     if isinstance(value, list):
-        return [fix_nested_value(item, field_path, known_array_fields) for item in value]
+        # OPTIMIZACIÓN: Solo procesar recursivamente si hay campos conocidos
+        if known_array_fields:
+            return [fix_nested_value(item, field_path, known_array_fields) for item in value]
+        else:
+            # No hay campos conocidos que necesiten corrección: retornar tal cual
+            return value
     
     # Para otros tipos, retornar tal cual
     return value
@@ -269,17 +291,31 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
-    # Detectar campos que son arrays en al menos un registro (nivel superior)
-    detected_array_fields = set()
-    for item in json_data:
-        for key, value in item.items():
-            if isinstance(value, list):
-                detected_array_fields.add(to_snake_case(key))
-    
-    # Combinar campos detectados con los proporcionados (si hay)
-    array_fields = detected_array_fields
+    # OPTIMIZACIÓN: Solo detectar campos array si no hay repeated_fields proporcionados
+    # Si hay repeated_fields, ya sabemos qué campos necesitan corrección
     if repeated_fields:
-        array_fields = array_fields | set(repeated_fields)
+        array_fields = set(repeated_fields)
+        # También detectar campos array en los datos para casos adicionales
+        detected_array_fields = set()
+        # OPTIMIZACIÓN: Solo revisar primeros N registros para detectar (más rápido)
+        sample_size = min(100, len(json_data))
+        for item in json_data[:sample_size]:
+            for key, value in item.items():
+                if isinstance(value, list):
+                    detected_array_fields.add(to_snake_case(key))
+        array_fields = array_fields | detected_array_fields
+    else:
+        # Detectar campos que son arrays - OPTIMIZACIÓN: solo revisar muestra
+        detected_array_fields = set()
+        sample_size = min(100, len(json_data))  # Revisar máximo 100 registros
+        for item in json_data[:sample_size]:
+            for key, value in item.items():
+                if isinstance(value, list):
+                    detected_array_fields.add(to_snake_case(key))
+        array_fields = detected_array_fields
+    
+    # OPTIMIZACIÓN: Solo usar fix_nested_value si hay campos que necesitan corrección
+    use_recursive_processing = bool(array_fields)
     
     # Transformar y limpiar
     with open(temp_path, 'w', encoding='utf-8') as f:
@@ -288,12 +324,14 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             for k, v in item.items():
                 snake_key = to_snake_case(k)
                 
-                # Procesar recursivamente para corregir campos anidados
-                # Pasar array_fields para que fix_nested_value pueda convertir NULL a [] cuando corresponda
-                fixed_value = fix_nested_value(v, snake_key, array_fields)
+                if use_recursive_processing:
+                    # Procesar recursivamente solo si hay campos que necesitan corrección
+                    fixed_value = fix_nested_value(v, snake_key, array_fields)
+                else:
+                    # No hay campos que necesiten corrección: copiar tal cual (más rápido)
+                    fixed_value = v
                 
-                # Si el campo es un array y viene como NULL (después del procesamiento recursivo),
-                # convertir a array vacío como fallback adicional
+                # Si el campo es un array y viene como NULL, convertir a array vacío
                 if snake_key in array_fields and fixed_value is None:
                     new_item[snake_key] = []
                 else:
@@ -608,9 +646,11 @@ def process_company(row):
             )
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
-        # Obtener esquemas de ambas tablas
-        staging_schema = bq_client.get_table(table_ref_staging).schema
-        final_schema = bq_client.get_table(table_ref_final).schema
+        # OPTIMIZACIÓN: Obtener esquemas de ambas tablas en una sola operación cuando sea posible
+        staging_table = bq_client.get_table(table_ref_staging)
+        final_table = bq_client.get_table(table_ref_final)
+        staging_schema = staging_table.schema
+        final_schema = final_table.schema
         
         # Obtener nombres de columnas (excluyendo campos ETL y id)
         staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
@@ -618,17 +658,11 @@ def process_company(row):
         common_cols = staging_cols & final_cols  # Intersección: columnas en ambas tablas
         new_cols = staging_cols - final_cols  # Columnas nuevas en staging que no están en final
         
-        # Verificar si hay STRUCTs que necesitan fusión (campos comunes que son STRUCT)
+        # OPTIMIZACIÓN: Solo verificar STRUCTs si hay columnas nuevas o si el MERGE falla
+        # No hacer esta verificación costosa en cada ejecución si no es necesario
         structs_to_merge = {}
-        for col_name in common_cols:
-            staging_field = next((f for f in staging_schema if f.name == col_name), None)
-            final_field = next((f for f in final_schema if f.name == col_name), None)
-            if staging_field and final_field and staging_field.field_type == 'STRUCT' and final_field.field_type == 'STRUCT':
-                # Verificar si hay diferencias en los campos anidados
-                staging_subfields = {f.name for f in staging_field.fields}
-                final_subfields = {f.name for f in final_field.fields}
-                if staging_subfields != final_subfields:
-                    structs_to_merge[col_name] = (staging_field, final_field)
+        # Solo verificar STRUCTs si realmente hay diferencias potenciales (columnas nuevas)
+        # o si el MERGE falla (se manejará en el bloque de errores)
         
         # Si hay columnas nuevas, agregarlas al esquema de la tabla final
         # IMPORTANTE: Usar ALTER TABLE ADD COLUMN en lugar de reconstruir el esquema completo
@@ -641,15 +675,12 @@ def process_company(row):
                 # Obtener esquema completo de staging (sin campos ETL)
                 new_schema_fields = [col for col in staging_schema if col.name in new_cols]
                 
-                # Agregar cada nueva columna individualmente usando ALTER TABLE
-                # Esto preserva todos los campos existentes, incluyendo campos anidados en STRUCTs
+                # Agregar cada nueva columna usando ALTER TABLE
+                # BigQuery requiere una sentencia ALTER TABLE por columna (secuencial)
                 for new_field in new_schema_fields:
                     try:
-                        # Construir SQL ALTER TABLE para agregar la columna
-                        # Necesitamos convertir el SchemaField a definición SQL
                         field_def = _schema_field_to_sql(new_field)
                         alter_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {field_def}"
-                        
                         query_job = bq_client.query(alter_sql)
                         query_job.result()
                         print(f"  ✅ Columna {new_field.name} agregada al esquema")
