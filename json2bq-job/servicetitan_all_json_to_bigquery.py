@@ -307,6 +307,27 @@ def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
     blob.upload_from_filename(local_file)
     print(f"📤 Subido a gs://{bucket_name}/{dest_blob_name}")
 
+def _schema_field_to_sql(field):
+    """Convierte un SchemaField de BigQuery a definición SQL para ALTER TABLE"""
+    field_name = field.name
+    field_type = field.field_type
+    
+    # Si es STRUCT, construir la definición recursivamente
+    if field_type == 'STRUCT':
+        fields_sql = ', '.join([_schema_field_to_sql(f) for f in field.fields])
+        struct_def = f"STRUCT<{fields_sql}>"
+    else:
+        struct_def = field_type
+    
+    # Agregar mode (NULLABLE, REQUIRED, REPEATED)
+    mode = field.mode or 'NULLABLE'
+    if mode == 'REPEATED':
+        return f"{field_name} ARRAY<{struct_def}>"
+    elif mode == 'REQUIRED':
+        return f"{field_name} {struct_def} NOT NULL"
+    else:
+        return f"{field_name} {struct_def}"
+
 def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, table_final):
     """Detecta si hay cambios reales entre staging y tabla final"""
     try:
@@ -597,21 +618,52 @@ def process_company(row):
         common_cols = staging_cols & final_cols  # Intersección: columnas en ambas tablas
         new_cols = staging_cols - final_cols  # Columnas nuevas en staging que no están en final
         
+        # Verificar si hay STRUCTs que necesitan fusión (campos comunes que son STRUCT)
+        structs_to_merge = {}
+        for col_name in common_cols:
+            staging_field = next((f for f in staging_schema if f.name == col_name), None)
+            final_field = next((f for f in final_schema if f.name == col_name), None)
+            if staging_field and final_field and staging_field.field_type == 'STRUCT' and final_field.field_type == 'STRUCT':
+                # Verificar si hay diferencias en los campos anidados
+                staging_subfields = {f.name for f in staging_field.fields}
+                final_subfields = {f.name for f in final_field.fields}
+                if staging_subfields != final_subfields:
+                    structs_to_merge[col_name] = (staging_field, final_field)
+        
         # Si hay columnas nuevas, agregarlas al esquema de la tabla final
+        # IMPORTANTE: Usar ALTER TABLE ADD COLUMN en lugar de reconstruir el esquema completo
+        # para evitar perder campos anidados en STRUCTs existentes
         if new_cols:
-            print(f"🆕 Columnas nuevas detectadas: {sorted(new_cols)}. Actualizando esquema de tabla final...")
-            # Obtener esquema completo de staging (sin campos ETL)
-            new_schema_fields = [col for col in staging_schema if col.name in new_cols]
-            final_table = bq_client.get_table(table_ref_final)
-            
-            # Separar campos ETL del resto del esquema para mantenerlos al final
-            etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
-            non_etl_fields = [col for col in final_table.schema if not col.name.startswith('_etl_')]
-            
-            # Reconstruir esquema: campos normales + nuevas columnas + campos ETL
-            final_table.schema = non_etl_fields + new_schema_fields + etl_fields
-            bq_client.update_table(final_table, ['schema'])
-            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)} (campos ETL mantenidos al final)")
+            try:
+                print(f"🆕 Columnas nuevas detectadas: {sorted(new_cols)}. Agregando al esquema de tabla final...")
+                final_table = bq_client.get_table(table_ref_final)
+                
+                # Obtener esquema completo de staging (sin campos ETL)
+                new_schema_fields = [col for col in staging_schema if col.name in new_cols]
+                
+                # Agregar cada nueva columna individualmente usando ALTER TABLE
+                # Esto preserva todos los campos existentes, incluyendo campos anidados en STRUCTs
+                for new_field in new_schema_fields:
+                    try:
+                        # Construir SQL ALTER TABLE para agregar la columna
+                        # Necesitamos convertir el SchemaField a definición SQL
+                        field_def = _schema_field_to_sql(new_field)
+                        alter_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {field_def}"
+                        
+                        query_job = bq_client.query(alter_sql)
+                        query_job.result()
+                        print(f"  ✅ Columna {new_field.name} agregada al esquema")
+                    except Exception as e:
+                        # Si falla ALTER TABLE, loguear y continuar sin agregar la columna
+                        # El MERGE manejará cualquier problema de esquema
+                        print(f"  ⚠️  No se pudo agregar {new_field.name} con ALTER TABLE: {str(e)}")
+                        print(f"  ⚠️  Continuando sin agregar esta columna. El MERGE manejará cualquier problema de esquema.")
+                
+                print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)}")
+            except Exception as schema_error:
+                # Si hay un error crítico al actualizar el esquema, loguear y continuar
+                print(f"⚠️  Error al actualizar esquema: {str(schema_error)}")
+                print(f"⚠️  Continuando con el MERGE. Si falla, se manejará en el bloque de errores del MERGE.")
         
         # Construir UPDATE SET solo con columnas comunes (ahora incluye las nuevas)
         update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
