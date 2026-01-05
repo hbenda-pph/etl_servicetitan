@@ -209,12 +209,17 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
 
 def fix_nested_value(value, field_path="", known_array_fields=None):
     """Función recursiva para corregir valores anidados.
-    Convierte objetos a arrays cuando el campo debería ser array (ej: serialNumbers)."""
+    Convierte objetos a arrays cuando el campo debería ser array (ej: serialNumbers).
+    También convierte NULL a [] para campos que están en known_array_fields."""
     if known_array_fields is None:
         known_array_fields = set()
     
-    # Si es None, retornar None (se manejará después)
+    # Si es None, verificar si este campo debería ser un array
     if value is None:
+        # Extraer el nombre del campo del path (último componente)
+        field_name = field_path.split('.')[-1] if field_path else ""
+        if field_name in known_array_fields:
+            return []  # Convertir NULL a array vacío para campos REPEATED
         return None
     
     # Si es un diccionario/objeto
@@ -284,9 +289,11 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
                 snake_key = to_snake_case(k)
                 
                 # Procesar recursivamente para corregir campos anidados
+                # Pasar array_fields para que fix_nested_value pueda convertir NULL a [] cuando corresponda
                 fixed_value = fix_nested_value(v, snake_key, array_fields)
                 
-                # Si el campo es un array y viene como NULL, convertir a array vacío
+                # Si el campo es un array y viene como NULL (después del procesamiento recursivo),
+                # convertir a array vacío como fallback adicional
                 if snake_key in array_fields and fixed_value is None:
                     new_item[snake_key] = []
                 else:
@@ -481,6 +488,7 @@ def process_company(row):
             
             # Intentar extraer campo REPEATED del mensaje de error
             # Formato 1: "Field: permissions; Value: NULL" (puede estar en cualquier parte del mensaje)
+            # Formato 1b: "Only optional fields can be set to NULL. Field: permissions; Value: NULL"
             match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
             
             # Formato 2: "JSON object specified for non-record field: items.serialNumbers"
@@ -502,7 +510,10 @@ def process_company(row):
                 # Limpiar datos con el campo detectado
                 # Si es un campo anidado (ej: items.serialNumbers), extraer solo el nombre del campo
                 field_name = problematic_field.split('.')[-1] if '.' in problematic_field else problematic_field
-                fix_json_format(temp_json, temp_fixed, repeated_fields={field_name})
+                # Convertir a snake_case para asegurar consistencia
+                field_name_snake = to_snake_case(field_name)
+                print(f"🔧 Campo a limpiar (snake_case): {field_name_snake}")
+                fix_json_format(temp_json, temp_fixed, repeated_fields={field_name_snake})
                 
                 # Reintentar carga
                 try:
@@ -674,11 +685,52 @@ def process_company(row):
                         break
                 
                 if new_struct_field:
+                    # Fusionar campos del STRUCT: preservar campos existentes que no están en staging
+                    # y agregar/actualizar campos nuevos de staging
+                    old_struct_field = None
+                    for field in final_table.schema:
+                        if field.name == problematic_struct_field:
+                            old_struct_field = field
+                            break
+                    
+                    if old_struct_field and old_struct_field.field_type == 'STRUCT' and new_struct_field.field_type == 'STRUCT':
+                        # Fusionar campos del STRUCT: combinar campos existentes con nuevos
+                        old_fields_dict = {f.name: f for f in old_struct_field.fields}
+                        new_fields_dict = {f.name: f for f in new_struct_field.fields}
+                        
+                        # Combinar: campos existentes primero, luego nuevos campos
+                        merged_fields = []
+                        # Agregar campos existentes (preservar orden y campos que no están en staging)
+                        for old_field in old_struct_field.fields:
+                            if old_field.name in new_fields_dict:
+                                # Campo existe en ambos: usar el de staging (puede tener cambios)
+                                merged_fields.append(new_fields_dict[old_field.name])
+                            else:
+                                # Campo solo existe en final: preservarlo
+                                merged_fields.append(old_field)
+                        
+                        # Agregar campos nuevos de staging que no están en final
+                        for new_field in new_struct_field.fields:
+                            if new_field.name not in old_fields_dict:
+                                merged_fields.append(new_field)
+                        
+                        # Crear nuevo campo STRUCT con campos fusionados
+                        merged_struct_field = bigquery.SchemaField(
+                            problematic_struct_field,
+                            'STRUCT',
+                            mode=old_struct_field.mode,
+                            fields=merged_fields,
+                            description=old_struct_field.description
+                        )
+                    else:
+                        # Si no es STRUCT o no se puede fusionar, usar el campo de staging directamente
+                        merged_struct_field = new_struct_field
+                    
                     # Reemplazar el campo en el esquema final
                     updated_schema = []
                     for field in final_table.schema:
                         if field.name == problematic_struct_field:
-                            updated_schema.append(new_struct_field)
+                            updated_schema.append(merged_struct_field)
                         elif not field.name.startswith('_etl_'):
                             updated_schema.append(field)
                     
@@ -808,17 +860,131 @@ def process_company(row):
                     )
                     print(f"❌ Error en MERGE: campo {problematic_field} no encontrado en staging")
             else:
-                log_event_bq(
-                    company_id=company_id,
-                    company_name=company_name,
-                    project_id=project_id,
-                    endpoint=endpoint_name,
-                    event_type="ERROR",
-                    event_title="Error en MERGE",
-                    event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",
-                    info={"merge_sql": merge_sql}
-                )
-                print(f"❌ Error en MERGE o borrado de staging: {error_msg} (la tabla staging NO se borra para depuración)")
+                # Detectar error de esquema faltante (ej: "Field address.isMilitary is missing in new schema")
+                schema_missing_match = re.search(r'Field\s+([\w.]+)\s+is missing in new schema', error_msg, re.IGNORECASE)
+                
+                if schema_missing_match:
+                    missing_field_path = schema_missing_match.group(1)
+                    print(f"🔍 Campo faltante en esquema detectado: {missing_field_path}")
+                    
+                    # Extraer el nombre del campo STRUCT (parte antes del punto)
+                    if '.' in missing_field_path:
+                        struct_field_name = missing_field_path.split('.')[0]
+                        print(f"🔧 Intentando fusionar campos del STRUCT {struct_field_name}...")
+                        
+                        # Obtener esquemas
+                        staging_table = bq_client.get_table(table_ref_staging)
+                        final_table = bq_client.get_table(table_ref_final)
+                        
+                        # Encontrar el campo STRUCT en ambos
+                        staging_struct_field = None
+                        final_struct_field = None
+                        
+                        for field in staging_table.schema:
+                            if field.name == struct_field_name:
+                                staging_struct_field = field
+                                break
+                        
+                        for field in final_table.schema:
+                            if field.name == struct_field_name:
+                                final_struct_field = field
+                                break
+                        
+                        if staging_struct_field and final_struct_field and \
+                           staging_struct_field.field_type == 'STRUCT' and final_struct_field.field_type == 'STRUCT':
+                            # Fusionar campos del STRUCT
+                            old_fields_dict = {f.name: f for f in final_struct_field.fields}
+                            new_fields_dict = {f.name: f for f in staging_struct_field.fields}
+                            
+                            merged_fields = []
+                            # Preservar todos los campos existentes en final
+                            for old_field in final_struct_field.fields:
+                                if old_field.name in new_fields_dict:
+                                    merged_fields.append(new_fields_dict[old_field.name])
+                                else:
+                                    merged_fields.append(old_field)
+                            
+                            # Agregar campos nuevos de staging
+                            for new_field in staging_struct_field.fields:
+                                if new_field.name not in old_fields_dict:
+                                    merged_fields.append(new_field)
+                            
+                            # Crear nuevo campo STRUCT fusionado
+                            merged_struct_field = bigquery.SchemaField(
+                                struct_field_name,
+                                'STRUCT',
+                                mode=final_struct_field.mode,
+                                fields=merged_fields,
+                                description=final_struct_field.description
+                            )
+                            
+                            # Actualizar esquema
+                            updated_schema = []
+                            for field in final_table.schema:
+                                if field.name == struct_field_name:
+                                    updated_schema.append(merged_struct_field)
+                                elif not field.name.startswith('_etl_'):
+                                    updated_schema.append(field)
+                            
+                            etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
+                            final_table.schema = updated_schema + etl_fields
+                            bq_client.update_table(final_table, ['schema'])
+                            print(f"✅ Esquema de STRUCT {struct_field_name} fusionado. Campo {missing_field_path} preservado.")
+                            
+                            # Reintentar MERGE
+                            try:
+                                query_job = bq_client.query(merge_sql)
+                                query_job.result()
+                                print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
+                                bq_client.delete_table(table_ref_staging, not_found_ok=True)
+                                print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
+                                log_event_bq(
+                                    company_id=company_id,
+                                    company_name=company_name,
+                                    project_id=project_id,
+                                    endpoint=endpoint_name,
+                                    event_type="SUCCESS",
+                                    event_title="MERGE exitoso (después de fusionar STRUCT)",
+                                    event_message=f"MERGE ejecutado exitosamente después de fusionar esquema de {struct_field_name}"
+                                )
+                            except Exception as retry_error:
+                                log_event_bq(
+                                    company_id=company_id,
+                                    company_name=company_name,
+                                    project_id=project_id,
+                                    endpoint=endpoint_name,
+                                    event_type="ERROR",
+                                    event_title="Error en MERGE (después de fusionar STRUCT)",
+                                    event_message=f"Error en MERGE después de fusionar {struct_field_name}: {str(retry_error)}"
+                                )
+                                print(f"❌ Error en MERGE después de fusionar STRUCT: {str(retry_error)}")
+                                continue  # Continuar al siguiente endpoint
+                        else:
+                            log_event_bq(
+                                company_id=company_id,
+                                company_name=company_name,
+                                project_id=project_id,
+                                endpoint=endpoint_name,
+                                event_type="ERROR",
+                                event_title="Error en MERGE",
+                                event_message=f"Error en MERGE: no se pudo fusionar campo {missing_field_path}. {error_msg}",
+                                info={"merge_sql": merge_sql}
+                            )
+                            print(f"❌ Error en MERGE: no se pudo fusionar campo {missing_field_path}")
+                            continue  # Continuar al siguiente endpoint
+                    else:
+                        log_event_bq(
+                            company_id=company_id,
+                            company_name=company_name,
+                            project_id=project_id,
+                            endpoint=endpoint_name,
+                            event_type="ERROR",
+                            event_title="Error en MERGE",
+                            event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",
+                            info={"merge_sql": merge_sql}
+                        )
+                        print(f"❌ Error en MERGE o borrado de staging: {error_msg} (la tabla staging NO se borra para depuración)")
+                        continue  # Continuar al siguiente endpoint
         
         # Borrar archivos temporales
         try:
