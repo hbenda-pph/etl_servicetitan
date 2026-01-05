@@ -789,8 +789,13 @@ def process_company(row):
                     # Mantener campos ETL al final
                     etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
                     final_table.schema = updated_schema + etl_fields
-                    bq_client.update_table(final_table, ['schema'])
-                    print(f"✅ Esquema de campo STRUCT {problematic_struct_field} actualizado.")
+                    try:
+                        bq_client.update_table(final_table, ['schema'])
+                        print(f"✅ Esquema de campo STRUCT {problematic_struct_field} actualizado.")
+                    except Exception as schema_error:
+                        print(f"❌ Error actualizando esquema STRUCT: {str(schema_error)}")
+                        print(f"⚠️  Continuando al siguiente endpoint")
+                        continue  # Continuar al siguiente endpoint
                     
                     # Reintentar MERGE
                     try:
@@ -822,6 +827,7 @@ def process_company(row):
                             info={"merge_sql": merge_sql}
                         )
                         print(f"❌ Error en MERGE después de actualizar STRUCT: {str(retry_error)}")
+                        continue  # Continuar al siguiente endpoint
                 else:
                     log_event_bq(
                         company_id=company_id,
@@ -834,6 +840,7 @@ def process_company(row):
                         info={"merge_sql": merge_sql}
                     )
                     print(f"❌ Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging")
+                    continue  # Continuar al siguiente endpoint
             elif type_mismatch:
                 # Campo cambió de tipo (ej: INT64 -> STRING)
                 new_type = type_mismatch.group(1)
@@ -866,8 +873,13 @@ def process_company(row):
                     # Mantener campos ETL al final
                     etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
                     final_table.schema = updated_schema + etl_fields
-                    bq_client.update_table(final_table, ['schema'])
-                    print(f"✅ Tipo de campo {problematic_field} actualizado de {old_type} a {new_type}.")
+                    try:
+                        bq_client.update_table(final_table, ['schema'])
+                        print(f"✅ Tipo de campo {problematic_field} actualizado de {old_type} a {new_type}.")
+                    except Exception as schema_error:
+                        print(f"❌ Error actualizando esquema de tipo: {str(schema_error)}")
+                        print(f"⚠️  Continuando al siguiente endpoint")
+                        continue  # Continuar al siguiente endpoint
                     
                     # Reintentar MERGE
                     try:
@@ -980,8 +992,13 @@ def process_company(row):
                             
                             etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
                             final_table.schema = updated_schema + etl_fields
-                            bq_client.update_table(final_table, ['schema'])
-                            print(f"✅ Esquema de STRUCT {struct_field_name} fusionado. Campo {missing_field_path} preservado.")
+                            try:
+                                bq_client.update_table(final_table, ['schema'])
+                                print(f"✅ Esquema de STRUCT {struct_field_name} fusionado. Campo {missing_field_path} preservado.")
+                            except Exception as schema_error:
+                                print(f"❌ Error actualizando esquema STRUCT fusionado: {str(schema_error)}")
+                                print(f"⚠️  Continuando al siguiente endpoint")
+                                continue  # Continuar al siguiente endpoint
                             
                             # Reintentar MERGE
                             try:
