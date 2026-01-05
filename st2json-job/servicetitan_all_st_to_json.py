@@ -243,7 +243,8 @@ class ServiceTitanAuth:
                         'Accept': 'application/json',
                         'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
+                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
+                    stream=True  # Necesario para usar response.raw
                 )
                 if response.status_code == 200:
                     success = True
@@ -265,7 +266,8 @@ class ServiceTitanAuth:
                         'Accept': 'application/json',
                         'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
+                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
+                    stream=True  # Necesario para usar response.raw
                 )
                 if response.status_code == 200:
                     success = True
@@ -286,7 +288,8 @@ class ServiceTitanAuth:
                         'Accept': 'application/json',
                         'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
+                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
+                    stream=True  # Necesario para usar response.raw
                 )
                 if response.status_code == 200:
                     success = True
@@ -306,7 +309,8 @@ class ServiceTitanAuth:
                         'Accept': 'application/json',
                         'Connection': 'keep-alive'
                     },
-                    timeout=(30, 600)  # Connect: 30s, Read: 10min para respuestas grandes
+                    timeout=(30, 600),  # Connect: 30s, Read: 10min para respuestas grandes
+                    stream=True  # Necesario para usar response.raw
                 )
                 if response.status_code == 200:
                     success = True
@@ -329,11 +333,11 @@ class ServiceTitanAuth:
                 raise ValueError(error_msg)
             
             # Procesar respuesta exitosa con manejo de errores de JSON
-            # Leer response.content directamente (bytes crudos) para evitar cualquier
-            # procesamiento intermedio que pueda corromper caracteres escapados como \"
+            # Leer desde response.raw directamente para obtener bytes sin ningún procesamiento
+            # Esto evita cualquier corrupción de caracteres escapados como \"
             try:
-                # Obtener el contenido como bytes crudos
-                response_content = response.content
+                # Leer directamente desde el stream raw para evitar procesamiento intermedio
+                response_content = response.raw.read()
                 
                 # Verificar que el contenido esté completo comparando con Content-Length
                 content_length_header = response.headers.get('Content-Length')
@@ -351,8 +355,8 @@ class ServiceTitanAuth:
                     response_text = response_content.decode('utf-8')
                 except UnicodeDecodeError as decode_err:
                     # Si UTF-8 falla, intentar con el encoding detectado por requests
-                    encoding = response.encoding or response.apparent_encoding or 'utf-8'
-                    if encoding == 'ISO-8859-1':
+                    encoding = response.headers.get('Content-Type', '').split('charset=')[-1].split(';')[0] or 'utf-8'
+                    if not encoding or encoding == 'ISO-8859-1':
                         encoding = 'utf-8'
                     response_text = response_content.decode(encoding, errors='replace')
                     print(f"⚠️  Advertencia: Se usó encoding '{encoding}' con reemplazo de errores")
@@ -381,8 +385,11 @@ class ServiceTitanAuth:
                         except UnicodeDecodeError:
                             response_text = response_content.decode('utf-8', errors='replace')
                     else:
-                        # Si no está disponible, usar response.content directamente
-                        response_content = response.content
+                        # Si no está disponible, intentar leer desde response.raw o response.content
+                        try:
+                            response_content = response.raw.read() if hasattr(response, 'raw') and response.raw else response.content
+                        except:
+                            response_content = response.content
                         response_size = len(response_content)
                         try:
                             response_text = response_content.decode('utf-8')
