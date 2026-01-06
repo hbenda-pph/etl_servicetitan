@@ -420,7 +420,7 @@ def process_company(row):
     company_start_time = time.time()
     
     # Log de inicio de procesamiento de compañía (solo una vez por compañía, no por endpoint)
-    print(f"\n{'='*80}\n🏢 Procesando compañía: {company_name} (ID: {company_id}) | project_id: {project_id}")
+    print(f"\n{'='*80}\n🏢 Procesando compañía: {company_name} (company_id: {company_id}) | project_id: {project_id}")
     bucket_name = f"{project_id}_servicetitan"
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
@@ -512,7 +512,7 @@ def process_company(row):
             )
             load_job.result()
             load_time = time.time() - load_start
-            print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} en {load_time:.1f}s")
+            # print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} en {load_time:.1f}s")
         except Exception as e:
             error_msg = str(e)
             problematic_field = None
@@ -556,7 +556,7 @@ def process_company(row):
                     )
                     load_job.result()
                     load_time = time.time() - load_start
-                    print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza) en {load_time:.1f}s")
+                    # print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza) en {load_time:.1f}s")
                 except Exception as retry_error:
                     log_event_bq(
                         company_id=company_id,
@@ -585,7 +585,7 @@ def process_company(row):
         # Asegurar que la tabla final existe
         try:
             bq_client.get_table(table_ref_final)
-            print(f"✅ Tabla final {dataset_final}.{table_final} ya existe.")
+            # print(f"✅ Tabla final {dataset_final}.{table_final} ya existe.")
         except NotFound:
             schema = bq_client.get_table(table_ref_staging).schema
             # AGREGAR CAMPOS ETL AL ESQUEMA (SOLO 2 CAMPOS)
@@ -703,10 +703,10 @@ def process_company(row):
             delete_start = time.time()
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
             delete_time = time.time() - delete_start
-            if delete_time > 0.5:
-                print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada en {delete_time:.1f}s")
-            else:
-                print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada")
+            # if delete_time > 0.5:
+            #     print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada en {delete_time:.1f}s")
+            # else:
+            #     print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada")
             
             endpoint_time = time.time() - endpoint_start_time
             print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
@@ -804,7 +804,7 @@ def process_company(row):
                         print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
                         
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
-                        print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
+                        # print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
                         
                         log_event_bq(
                             company_id=company_id,
@@ -888,7 +888,7 @@ def process_company(row):
                         print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
                         
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
-                        print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
+                        # print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
                         
                         log_event_bq(
                             company_id=company_id,
@@ -1065,7 +1065,7 @@ def process_company(row):
     # Resumen de tiempo por compañía
     company_elapsed = time.time() - company_start_time
     print(f"\n{'='*80}")
-    print(f"✅ Compañía {company_name} completada en {company_elapsed:.1f} segundos ({company_elapsed/60:.1f} minutos)")
+    print(f"✅ Compañía {company_name} (company_id: {company_id}) completada en {company_elapsed:.1f} segundos ({company_elapsed/60:.1f} minutos)")
     print(f"{'='*80}")
 
 def main():
@@ -1179,8 +1179,8 @@ def main():
             company_start_time = time.time()
             process_company(row)
             procesadas += 1
-            company_elapsed = time.time() - company_start_time
-            print(f"✅ Compañía {row.company_name} procesada en {company_elapsed:.1f} segundos")
+            # company_elapsed = time.time() - company_start_time
+            # print(f"✅ Compañía {row.company_name} procesada en {company_elapsed:.1f} segundos")  # Duplicado, ya se muestra al final de process_company
         except TimeoutError:
             # Re-lanzar timeout para que se propague
             raise
