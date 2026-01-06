@@ -71,12 +71,20 @@ case "$ENVIRONMENT" in
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-qua.iam.gserviceaccount.com"
         ;;
     pro)
-        PROJECT_ID="platform-partners-pro"
-        PROJECT_ID_EMAIL="constant-height-455614-i0"  # Project ID para email de service account
+        PROJECT_ID="constant-height-455614-i0"  # Project ID real de PRO (necesario para build y comandos gcloud)
+        PROJECT_NAME="platform-partners-pro"    # Project name (para variable de entorno GCP_PROJECT)
         JOB_NAME="etl-json2bq-job"
-        SERVICE_ACCOUNT="etl-servicetitan@${PROJECT_ID_EMAIL}.iam.gserviceaccount.com"
+        SERVICE_ACCOUNT="etl-servicetitan@${PROJECT_ID}.iam.gserviceaccount.com"
         ;;
 esac
+
+# Para DEV y QUA, PROJECT_NAME = PROJECT_ID (son iguales)
+if [ -z "$PROJECT_NAME" ]; then
+    PROJECT_NAME="${PROJECT_ID}"
+fi
+
+# GCP_PROJECT para variable de entorno: usar PROJECT_NAME para que Python lea la tabla correcta
+GCP_PROJECT_ENV="${PROJECT_NAME}"
 
 REGION="us-east1"
 IMAGE_NAME="etl-json2bq"
@@ -98,7 +106,10 @@ echo "🚀 Iniciando Build & Deploy para ETL-JSON2BQ-JOB"
 echo "=================================================="
 echo "🌍 AMBIENTE: ${ENVIRONMENT^^}"
 echo "📋 Configuración:"
-echo "   Proyecto: ${PROJECT_ID}"
+echo "   Proyecto ID: ${PROJECT_ID}"
+if [ "$ENVIRONMENT" = "pro" ]; then
+    echo "   Proyecto Name: ${PROJECT_NAME}"
+fi
 echo "   Job Name: ${JOB_NAME}"
 echo "   Región: ${REGION}"
 echo "   Imagen: ${IMAGE_TAG}"
@@ -161,7 +172,7 @@ if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_I
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
         --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${PROJECT_ID}"
+        --set-env-vars GCP_PROJECT=${GCP_PROJECT_ENV}"
     
     # Agregar paralelismo si está configurado
     if [ "$TASKS" != "1" ]; then
@@ -181,7 +192,7 @@ else
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
         --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${PROJECT_ID}"
+        --set-env-vars GCP_PROJECT=${GCP_PROJECT_ENV}"
     
     # Agregar paralelismo si está configurado
     if [ "$TASKS" != "1" ]; then
