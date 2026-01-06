@@ -86,6 +86,14 @@ CPU="4"
 MAX_RETRIES="1"
 TASK_TIMEOUT="2400"
 
+# Configuración de paralelismo (Cloud Run Jobs)
+# PARALLELISM: Número de tareas que se ejecutan simultáneamente
+# TASKS: Número total de tareas a ejecutar
+# Ejemplo: Si tienes 30 compañías y TASKS=3, cada tarea procesará ~10 compañías
+# Para desactivar paralelismo, establecer ambos a 1
+PARALLELISM="3"  # Ejecutar 3 tareas en paralelo
+TASKS="3"         # Total de 3 tareas (cada una procesa ~10 compañías si hay 30)
+
 echo "🚀 Iniciando Build & Deploy para ETL-JSON2BQ-JOB"
 echo "=================================================="
 echo "🌍 AMBIENTE: ${ENVIRONMENT^^}"
@@ -98,6 +106,9 @@ echo "   Service Account: ${SERVICE_ACCOUNT}"
 echo "   Memoria: ${MEMORY}"
 echo "   CPU: ${CPU}"
 echo "   Timeout: ${TASK_TIMEOUT}s"
+if [ "$TASKS" != "1" ]; then
+    echo "   🚀 Paralelismo: ${PARALLELISM} tareas simultáneas, ${TASKS} tareas totales"
+fi
 echo ""
 
 # Verificar que estamos en el directorio correcto
@@ -140,7 +151,8 @@ echo "============================="
 # Verificar si el job ya existe
 if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID} &> /dev/null; then
     echo "📝 Job existe, actualizando..."
-    gcloud run jobs update ${JOB_NAME} \
+    # Construir comando base
+    UPDATE_CMD="gcloud run jobs update ${JOB_NAME} \
         --image ${IMAGE_TAG} \
         --region ${REGION} \
         --project ${PROJECT_ID} \
@@ -149,10 +161,18 @@ if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_I
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
         --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${PROJECT_ID}
+        --set-env-vars GCP_PROJECT=${PROJECT_ID}"
+    
+    # Agregar paralelismo si está configurado
+    if [ "$TASKS" != "1" ]; then
+        UPDATE_CMD="${UPDATE_CMD} --parallelism ${PARALLELISM} --tasks ${TASKS}"
+    fi
+    
+    eval ${UPDATE_CMD}
 else
     echo "🆕 Job no existe, creando..."
-    gcloud run jobs create ${JOB_NAME} \
+    # Construir comando base
+    CREATE_CMD="gcloud run jobs create ${JOB_NAME} \
         --image ${IMAGE_TAG} \
         --region ${REGION} \
         --project ${PROJECT_ID} \
@@ -161,7 +181,14 @@ else
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
         --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${PROJECT_ID}
+        --set-env-vars GCP_PROJECT=${PROJECT_ID}"
+    
+    # Agregar paralelismo si está configurado
+    if [ "$TASKS" != "1" ]; then
+        CREATE_CMD="${CREATE_CMD} --parallelism ${PARALLELISM} --tasks ${TASKS}"
+    fi
+    
+    eval ${CREATE_CMD}
 fi
 
 if [ $? -eq 0 ]; then

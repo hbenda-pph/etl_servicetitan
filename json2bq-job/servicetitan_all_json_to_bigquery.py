@@ -1073,16 +1073,33 @@ def main():
     JOB_TIMEOUT_SECONDS = 40 * 60
     start_time = time.time()
     
+    # Detectar si estamos en modo paralelo (Cloud Run Jobs con múltiples tareas)
+    # Cloud Run Jobs establece estas variables de entorno automáticamente:
+    # CLOUD_RUN_TASK_INDEX: índice de la tarea actual (0-based)
+    # CLOUD_RUN_TASK_COUNT: número total de tareas
+    task_index = int(os.environ.get('CLOUD_RUN_TASK_INDEX', '0'))
+    task_count = int(os.environ.get('CLOUD_RUN_TASK_COUNT', '1'))
+    is_parallel = task_count > 1
+    
+    if is_parallel:
+        print(f"\n{'='*80}")
+        print(f"🚀 MODO PARALELO ACTIVADO")
+        print(f"   Tarea: {task_index + 1}/{task_count}")
+        print(f"{'='*80}")
+    
     # Log de inicio del proceso ETL
     log_event_bq(
         event_type="INFO",
         event_title="Inicio proceso ETL",
-        event_message="Iniciando proceso ETL de ServiceTitan para todas las compañías activas"
+        event_message=f"Iniciando proceso ETL de ServiceTitan para todas las compañías activas" + 
+                     (f" (Tarea {task_index + 1}/{task_count})" if is_parallel else "")
     )
 
     print(f"\n{'='*80}")
-    print("CONECTANDO A BigQuery PARA OBTENER COMPAÑÍAS...")
+    print("Conectando a BigQuery para obtener compañías...")
     print(f"⏱️  Tiempo límite del job: {JOB_TIMEOUT_SECONDS // 60} minutos")
+    if is_parallel:
+        print(f"🔄 Procesamiento paralelo: Tarea {task_index + 1} de {task_count}")
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f'''
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
@@ -1091,11 +1108,31 @@ def main():
     '''
     results = list(client.query(query).result())  # Convertir a lista para poder contar
     total = len(results)
+    
+    # En modo paralelo, dividir las compañías entre las tareas
+    if is_parallel:
+        # Calcular qué compañías procesa esta tarea
+        companies_per_task = total // task_count
+        remainder = total % task_count
+        
+        # Las primeras tareas procesan una compañía extra si hay resto
+        start_idx = task_index * companies_per_task + min(task_index, remainder)
+        end_idx = start_idx + companies_per_task + (1 if task_index < remainder else 0)
+        
+        # Filtrar compañías para esta tarea
+        results = results[start_idx:end_idx]
+        total_assigned = len(results)
+        
+        print(f"📊 Total de compañías: {total}")
+        print(f"📊 Compañías asignadas a esta tarea: {total_assigned} (índices {start_idx+1}-{end_idx} de {total})")
+    else:
+        total_assigned = total
+        print(f"📊 Total de compañías a procesar: {total}")
+    
+    print(f"{'='*80}\n")
+    
     procesadas = 0
     start_company_time = start_time
-    
-    print(f"📊 Total de compañías a procesar: {total}")
-    print(f"{'='*80}\n")
     
     for idx, row in enumerate(results, 1):
         # Verificar tiempo transcurrido antes de procesar cada compañía
@@ -1128,7 +1165,15 @@ def main():
         
         # Log del progreso
         elapsed_minutes = elapsed_time / 60
-        print(f"\n📊 Progreso: Compañía {idx}/{total} | Tiempo transcurrido: {elapsed_minutes:.1f} min | Restante: {remaining_time // 60:.1f} min")
+        if is_parallel:
+            # Calcular índice global para mostrar progreso total
+            companies_per_task_base = len(results) // task_count if task_count > 0 else 0
+            remainder = len(results) % task_count if task_count > 0 else 0
+            start_idx = task_index * companies_per_task_base + min(task_index, remainder)
+            global_idx = start_idx + idx
+            print(f"\n📊 Progreso: Compañía {idx}/{total_assigned} (global: ~{global_idx}) | Tiempo: {elapsed_minutes:.1f} min | Restante: {remaining_time // 60:.1f} min")
+        else:
+            print(f"\n📊 Progreso: Compañía {idx}/{total_assigned} | Tiempo: {elapsed_minutes:.1f} min | Restante: {remaining_time // 60:.1f} min")
         
         try:
             company_start_time = time.time()
@@ -1154,14 +1199,18 @@ def main():
     # Log de fin del proceso ETL
     total_time = time.time() - start_time
     total_minutes = total_time / 60
+    task_info = f" (Tarea {task_index + 1}/{task_count})" if is_parallel else ""
     log_event_bq(
         event_type="SUCCESS",
         event_title="Fin proceso ETL",
-        event_message=f"Proceso ETL completado. {procesadas}/{total} compañías procesadas exitosamente en {total_minutes:.1f} minutos."
+        event_message=f"Proceso ETL completado{task_info}. {procesadas}/{total_assigned} compañías procesadas exitosamente en {total_minutes:.1f} minutos."
     )
     
     print(f"\n{'='*80}")
-    print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente en {total_minutes:.1f} minutos.")
+    if is_parallel:
+        print(f"🏁 Resumen Tarea {task_index + 1}/{task_count}: {procesadas}/{total_assigned} compañías procesadas en {total_minutes:.1f} minutos.")
+    else:
+        print(f"🏁 Resumen: {procesadas}/{total_assigned} compañías procesadas exitosamente en {total_minutes:.1f} minutos.")
     print(f"{'='*80}")
 
 if __name__ == "__main__":
