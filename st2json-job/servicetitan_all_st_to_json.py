@@ -693,9 +693,9 @@ def main():
     if is_parallel:
         print(f"🔄 Procesamiento paralelo: Tarea {task_index + 1} de {task_count}")
     
-    # Usar PROJECT_SOURCE tanto para el cliente como para las queries
-    # BigQuery Client acepta project_name (como "platform-partners-pro")
-    client = bigquery.Client(project=PROJECT_SOURCE)
+    # Crear cliente sin especificar project (usa el del service account = project_id real)
+    # Usar PROJECT_SOURCE (project_name) en la query SQL (BigQuery acepta project_name en queries)
+    client = bigquery.Client()  # Usa el project del service account automáticamente
     query = f"""
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_fivetran_status = TRUE
