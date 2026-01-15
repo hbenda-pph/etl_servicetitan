@@ -155,7 +155,7 @@ SCHEDULE_NAME="orchestrate-etl-jobs-schedule"
 SCHEDULE_CRON="0 */6 * * *"  # Cada 6 horas
 
 if [ "$ENVIRONMENT" = "pro" ]; then
-    # Obtener URL de la función
+    # Obtener URL pública de la función (igual que en DEV)
     FUNCTION_URL=$(gcloud functions describe ${FUNCTION_NAME} --gen2 --region=${REGION} --project=${PROJECT_ID} --format="value(serviceConfig.uri)" 2>/dev/null || echo "")
     
     if [ -z "$FUNCTION_URL" ]; then
@@ -164,6 +164,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
     fi
     
     # Solo en producción: crear/actualizar scheduler
+    # Usar oidcToken (como en DEV) en lugar de oauthToken para poder usar URL pública
     if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
         echo "📝 Scheduler existe, actualizando..."
         gcloud scheduler jobs update http ${SCHEDULE_NAME} \
@@ -172,8 +173,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
             --schedule="${SCHEDULE_CRON}" \
             --uri="${FUNCTION_URL}" \
             --http-method=POST \
-            --oauth-service-account-email=${SERVICE_ACCOUNT} \
-            --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
+            --oidc-service-account-email=${SERVICE_ACCOUNT}
     else
         echo "🆕 Scheduler no existe, creando..."
         gcloud scheduler jobs create http ${SCHEDULE_NAME} \
@@ -182,8 +182,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
             --schedule="${SCHEDULE_CRON}" \
             --uri="${FUNCTION_URL}" \
             --http-method=POST \
-            --oauth-service-account-email=${SERVICE_ACCOUNT} \
-            --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
+            --oidc-service-account-email=${SERVICE_ACCOUNT}
     fi
     
     if [ $? -eq 0 ]; then
