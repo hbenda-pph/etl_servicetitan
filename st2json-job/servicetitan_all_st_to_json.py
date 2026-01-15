@@ -21,6 +21,9 @@ def get_project_source():
     2. Variable de entorno GOOGLE_CLOUD_PROJECT
     3. Proyecto por defecto del cliente BigQuery
     4. Fallback hardcoded según ambiente detectado
+    
+    Nota: En PRO, GCP_PROJECT contiene "platform-partners-pro" (project_name),
+    pero para crear el cliente BigQuery necesitamos el project_id real.
     """
     # Cloud Run Jobs establece GCP_PROJECT automáticamente
     project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
@@ -39,7 +42,24 @@ def get_project_source():
     # En Cloud Run, el service account tiene el formato: service@PROJECT.iam.gserviceaccount.com
     return "platform-partners-qua"  # Fallback por defecto
 
-PROJECT_SOURCE = get_project_source()
+def get_bigquery_client_project():
+    """
+    Obtiene el project_id real para crear el cliente BigQuery.
+    En PRO, el project_name es "platform-partners-pro" pero el project_id es "constant-height-455614-i0".
+    Para crear el cliente, necesitamos el project_id real.
+    Para las queries SQL, podemos usar el project_name.
+    """
+    project_source = get_project_source()
+    
+    # Si estamos en PRO y recibimos el project_name, usar el project_id real
+    if project_source == "platform-partners-pro":
+        return "constant-height-455614-i0"
+    
+    # Para otros ambientes, project_name = project_id
+    return project_source
+
+PROJECT_SOURCE = get_project_source()  # Para usar en queries SQL (acepta project_name)
+PROJECT_ID_FOR_CLIENT = get_bigquery_client_project()  # Para crear el cliente BigQuery (necesita project_id real)
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
@@ -689,7 +709,9 @@ def main():
     if is_parallel:
         print(f"🔄 Procesamiento paralelo: Tarea {task_index + 1} de {task_count}")
     
-    client = bigquery.Client(project=PROJECT_SOURCE)
+    # Usar PROJECT_ID_FOR_CLIENT para crear el cliente (necesita project_id real)
+    # Usar PROJECT_SOURCE en la query SQL (acepta project_name)
+    client = bigquery.Client(project=PROJECT_ID_FOR_CLIENT)
     query = f"""
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_fivetran_status = TRUE
