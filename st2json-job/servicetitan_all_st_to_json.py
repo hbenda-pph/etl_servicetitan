@@ -349,7 +349,7 @@ class ServiceTitanAuth:
                     # Descomprimir el contenido gzip manualmente
                     try:
                         response_content = gzip.decompress(response_content)
-                        print(f"✅ Respuesta descomprimida (gzip): {len(response_content)} bytes")
+                        # Log solo en caso de error, no en cada descompresión exitosa
                     except Exception as gzip_err:
                         error_msg = f"Error descomprimiendo respuesta gzip: {str(gzip_err)}"
                         print(f"❌ {error_msg}")
