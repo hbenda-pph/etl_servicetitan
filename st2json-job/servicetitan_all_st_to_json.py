@@ -6,6 +6,8 @@ import os
 import time
 import shutil
 import re
+import gzip
+import io
 from google.cloud import bigquery, storage
 
 # Configuración de BigQuery
@@ -335,19 +337,36 @@ class ServiceTitanAuth:
             # Procesar respuesta exitosa con manejo de errores de JSON
             # Leer desde response.raw directamente para obtener bytes sin ningún procesamiento
             # Esto evita cualquier corrupción de caracteres escapados como \"
+            # NOTA: Cuando se usa stream=True y response.raw, requests NO descomprime automáticamente gzip
             try:
                 # Leer directamente desde el stream raw para evitar procesamiento intermedio
                 response_content = response.raw.read()
                 
-                # Verificar que el contenido esté completo comparando con Content-Length
-                content_length_header = response.headers.get('Content-Length')
-                if content_length_header:
-                    expected_size = int(content_length_header)
-                    actual_size = len(response_content)
-                    if actual_size < expected_size:
-                        error_msg = f"Respuesta truncada: esperados {expected_size} bytes, recibidos {actual_size} bytes"
+                # Verificar si la respuesta está comprimida con gzip
+                # Cuando usamos stream=True y response.raw, debemos descomprimir manualmente
+                content_encoding = response.headers.get('Content-Encoding', '').lower()
+                if content_encoding == 'gzip':
+                    # Descomprimir el contenido gzip manualmente
+                    try:
+                        response_content = gzip.decompress(response_content)
+                        print(f"✅ Respuesta descomprimida (gzip): {len(response_content)} bytes")
+                    except Exception as gzip_err:
+                        error_msg = f"Error descomprimiendo respuesta gzip: {str(gzip_err)}"
                         print(f"❌ {error_msg}")
-                        raise ValueError(error_msg)
+                        raise ValueError(error_msg) from gzip_err
+                
+                # Verificar que el contenido esté completo comparando con Content-Length
+                # Nota: Content-Length puede referirse al tamaño comprimido, así que solo verificamos si no está comprimido
+                # Cuando hay compresión, Content-Length es el tamaño comprimido, así que no podemos validar fácilmente
+                if not content_encoding:
+                    content_length_header = response.headers.get('Content-Length')
+                    if content_length_header:
+                        expected_size = int(content_length_header)
+                        actual_size = len(response_content)
+                        if actual_size < expected_size:
+                            error_msg = f"Respuesta truncada: esperados {expected_size} bytes, recibidos {actual_size} bytes"
+                            print(f"❌ {error_msg}")
+                            raise ValueError(error_msg)
                 
                 # Decodificar usando UTF-8 explícitamente
                 # NO usar response.text porque puede procesar caracteres de manera diferente
@@ -379,6 +398,13 @@ class ServiceTitanAuth:
                 try:
                     # El contenido ya debería estar leído en response_content
                     if 'response_content' in locals():
+                        # Verificar si necesita descompresión
+                        content_encoding = response.headers.get('Content-Encoding', '').lower()
+                        if content_encoding == 'gzip':
+                            try:
+                                response_content = gzip.decompress(response_content)
+                            except:
+                                pass  # Si falla la descompresión, continuar con el contenido original
                         response_size = len(response_content)
                         try:
                             response_text = response_content.decode('utf-8')
@@ -390,6 +416,13 @@ class ServiceTitanAuth:
                             response_content = response.raw.read() if hasattr(response, 'raw') and response.raw else response.content
                         except:
                             response_content = response.content
+                        # Verificar si necesita descompresión
+                        content_encoding = response.headers.get('Content-Encoding', '').lower()
+                        if content_encoding == 'gzip':
+                            try:
+                                response_content = gzip.decompress(response_content)
+                            except:
+                                pass  # Si falla la descompresión, continuar con el contenido original
                         response_size = len(response_content)
                         try:
                             response_text = response_content.decode('utf-8')
@@ -636,27 +669,73 @@ def process_company(row):
             print(f"❌ Error en endpoint {api_data}: {str(e)}")
 
 def main():
+    # Detectar si estamos en modo paralelo (Cloud Run Jobs con múltiples tareas)
+    # Cloud Run Jobs establece estas variables de entorno automáticamente:
+    # CLOUD_RUN_TASK_INDEX: índice de la tarea actual (0-based)
+    # CLOUD_RUN_TASK_COUNT: número total de tareas
+    task_index = int(os.environ.get('CLOUD_RUN_TASK_INDEX', '0'))
+    task_count = int(os.environ.get('CLOUD_RUN_TASK_COUNT', '1'))
+    is_parallel = task_count > 1
+    
+    if is_parallel:
+        print(f"\n{'='*80}")
+        print(f"🚀 MODO PARALELO ACTIVADO")
+        print(f"   Tarea: {task_index + 1}/{task_count}")
+        print(f"{'='*80}")
+    
     print(f"🔍 Proyecto detectado para companies: {PROJECT_SOURCE}")
     print(f"🔍 Proyecto para metadata: {METADATA_PROJECT}")
     print("Conectando a BigQuery para obtener compañías...")
+    if is_parallel:
+        print(f"🔄 Procesamiento paralelo: Tarea {task_index + 1} de {task_count}")
+    
     client = bigquery.Client(project=PROJECT_SOURCE)
     query = f"""
         SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_fivetran_status = TRUE
         ORDER BY company_id
     """
-    results = client.query(query).result()
-    total = 0
+    results = list(client.query(query).result())  # Convertir a lista para poder contar
+    total = len(results)
+    
+    # En modo paralelo, dividir las compañías entre las tareas
+    if is_parallel:
+        # Calcular qué compañías procesa esta tarea
+        companies_per_task = total // task_count
+        remainder = total % task_count
+        
+        # Las primeras tareas procesan una compañía extra si hay resto
+        start_idx = task_index * companies_per_task + min(task_index, remainder)
+        end_idx = start_idx + companies_per_task + (1 if task_index < remainder else 0)
+        
+        # Filtrar compañías para esta tarea
+        results = results[start_idx:end_idx]
+        total_assigned = len(results)
+        
+        print(f"📊 Total de compañías: {total}")
+        print(f"📊 Compañías asignadas a esta tarea: {total_assigned} (índices {start_idx+1}-{end_idx} de {total})")
+    else:
+        total_assigned = total
+        print(f"📊 Total de compañías a procesar: {total}")
+    
+    print(f"{'='*80}\n")
+    
     procesadas = 0
-    for row in results:
-        total += 1
+    for idx, row in enumerate(results, 1):
         try:
+            if is_parallel:
+                print(f"\n[{idx}/{total_assigned}] Procesando compañía: {row.company_name}")
             process_company(row)
             procesadas += 1
         except Exception as e:
             print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
+    
     print(f"\n{'='*80}")
-    print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
+    if is_parallel:
+        print(f"🏁 Resumen Tarea {task_index + 1}/{task_count}: {procesadas}/{total_assigned} compañías procesadas exitosamente.")
+        print(f"📊 Total global: {total} compañías distribuidas en {task_count} tareas")
+    else:
+        print(f"🏁 Resumen: {procesadas}/{total} compañías procesadas exitosamente.")
 
 if __name__ == "__main__":
     main()
