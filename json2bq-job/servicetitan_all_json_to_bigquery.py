@@ -37,8 +37,25 @@ PROJECT_SOURCE = get_project_source()
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
-# Configuración para logging centralizado (usar proyecto detectado)
-LOGS_PROJECT = PROJECT_SOURCE
+def get_bigquery_project_id():
+    """
+    Obtiene el project_id real para usar en queries SQL y operaciones de BigQuery.
+    En PRO, GCP_PROJECT contiene "platform-partners-pro" (project_name),
+    pero necesitamos usar "constant-height-455614-i0" (project_id) en las operaciones.
+    """
+    project_source = get_project_source()
+    
+    # Si estamos en PRO y recibimos el project_name, usar el project_id real
+    if project_source == "platform-partners-pro":
+        return "constant-height-455614-i0"
+    
+    # Para otros ambientes, project_name = project_id
+    return project_source
+
+PROJECT_ID_FOR_QUERY = get_bigquery_project_id()  # Para usar en queries SQL (project_id real)
+
+# Configuración para logging centralizado (usar project_id real)
+LOGS_PROJECT = PROJECT_ID_FOR_QUERY
 LOGS_DATASET = "logs"
 LOGS_TABLE = "etl_servicetitan"
 
@@ -1100,9 +1117,11 @@ def main():
     print(f"⏱️  Tiempo límite del job: {JOB_TIMEOUT_SECONDS // 60} minutos")
     if is_parallel:
         print(f"🔄 Procesamiento paralelo: Tarea {task_index + 1} de {task_count}")
-    client = bigquery.Client(project=PROJECT_SOURCE)
+    # Crear cliente sin especificar project (usa el del service account = project_id real)
+    # Usar PROJECT_ID_FOR_QUERY (project_id real) en la query SQL
+    client = bigquery.Client()  # Usa el project del service account automáticamente
     query = f'''
-        SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
+        SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_bigquery_status = TRUE
         ORDER BY company_id
     '''
