@@ -21,10 +21,6 @@ def get_project_source():
     2. Variable de entorno GOOGLE_CLOUD_PROJECT
     3. Proyecto por defecto del cliente BigQuery
     4. Fallback hardcoded según ambiente detectado
-    
-    Nota: En PRO, GCP_PROJECT contiene "platform-partners-pro" (project_name).
-    BigQuery Client acepta tanto project_name como project_id, así que usamos el project_name
-    que es lo que se establece en la variable de entorno GCP_PROJECT.
     """
     # Cloud Run Jobs establece GCP_PROJECT automáticamente
     project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
@@ -43,7 +39,23 @@ def get_project_source():
     # En Cloud Run, el service account tiene el formato: service@PROJECT.iam.gserviceaccount.com
     return "platform-partners-qua"  # Fallback por defecto
 
-PROJECT_SOURCE = get_project_source()
+def get_bigquery_project_id():
+    """
+    Obtiene el project_id real para usar en queries SQL.
+    En PRO, GCP_PROJECT contiene "platform-partners-pro" (project_name),
+    pero necesitamos usar "constant-height-455614-i0" (project_id) en las queries.
+    """
+    project_source = get_project_source()
+    
+    # Si estamos en PRO y recibimos el project_name, usar el project_id real
+    if project_source == "platform-partners-pro":
+        return "constant-height-455614-i0"
+    
+    # Para otros ambientes, project_name = project_id
+    return project_source
+
+PROJECT_SOURCE = get_project_source()  # Para logging/información
+PROJECT_ID_FOR_QUERY = get_bigquery_project_id()  # Para usar en queries SQL (project_id real)
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
@@ -688,16 +700,17 @@ def main():
         print(f"{'='*80}")
     
     print(f"🔍 Proyecto detectado para companies: {PROJECT_SOURCE}")
+    print(f"🔍 Project ID para queries: {PROJECT_ID_FOR_QUERY}")
     print(f"🔍 Proyecto para metadata: {METADATA_PROJECT}")
     print("Conectando a BigQuery para obtener compañías...")
     if is_parallel:
         print(f"🔄 Procesamiento paralelo: Tarea {task_index + 1} de {task_count}")
     
     # Crear cliente sin especificar project (usa el del service account = project_id real)
-    # Usar PROJECT_SOURCE (project_name) en la query SQL (BigQuery acepta project_name en queries)
+    # Usar PROJECT_ID_FOR_QUERY (project_id real) en la query SQL
     client = bigquery.Client()  # Usa el project del service account automáticamente
     query = f"""
-        SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
+        SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_fivetran_status = TRUE
         ORDER BY company_id
     """
