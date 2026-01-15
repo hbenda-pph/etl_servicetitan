@@ -172,7 +172,7 @@ if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_I
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
         --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${GCP_PROJECT_ENV}"
+        --update-env-vars GCP_PROJECT=${GCP_PROJECT_ENV}"
     
     # Agregar paralelismo si está configurado
     if [ "$TASKS" != "1" ]; then
