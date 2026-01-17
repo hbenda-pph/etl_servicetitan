@@ -876,7 +876,7 @@ def process_company(row):
                         continue  # Continuar al siguiente endpoint
                     
                     # CRÍTICO: Los datos existentes tienen estructura antigua (camelCase)
-                    # No podemos hacer MERGE directo - usar COPY + UPDATE para migrar datos
+                    # No podemos hacer MERGE directo - usar COPY + agregar campos ETL + UPDATE
                     print(f"🔄 Migrando datos de staging a final (incompatibilidad de STRUCT detectada)...")
                     try:
                         # Paso 1: Copiar datos de staging a final (reemplaza completamente)
@@ -887,15 +887,41 @@ def process_company(row):
                             job_config=bigquery.CopyJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
                         )
                         copy_job.result()
-                        print(f"✅ Datos copiados de staging a final (esquema actualizado a snake_case).")
+                        print(f"✅ Datos copiados de staging a final.")
                         
-                        # Paso 2: Agregar campos ETL a registros nuevos
+                        # Paso 2: Agregar campos ETL si no existen (COPY los eliminó)
+                        try:
+                            final_table_check = bq_client.get_table(table_ref_final)
+                            has_etl_synced = any(col.name == '_etl_synced' for col in final_table_check.schema)
+                            has_etl_operation = any(col.name == '_etl_operation' for col in final_table_check.schema)
+                            
+                            if not has_etl_synced or not has_etl_operation:
+                                print(f"🔧 Agregando campos ETL que se perdieron en COPY...")
+                                alter_etl_sql = f'''
+                                    ALTER TABLE `{project_id}.{dataset_final}.{table_final}`
+                                    ADD COLUMN IF NOT EXISTS _etl_synced TIMESTAMP,
+                                    ADD COLUMN IF NOT EXISTS _etl_operation STRING
+                                '''
+                                # BigQuery requiere ADD COLUMN por separado
+                                if not has_etl_synced:
+                                    alter_sql1 = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS _etl_synced TIMESTAMP"
+                                    etl_job1 = bq_client.query(alter_sql1)
+                                    etl_job1.result()
+                                if not has_etl_operation:
+                                    alter_sql2 = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS _etl_operation STRING"
+                                    etl_job2 = bq_client.query(alter_sql2)
+                                    etl_job2.result()
+                                print(f"✅ Campos ETL agregados.")
+                        except Exception as etl_error:
+                            print(f"⚠️  Error verificando/agregando campos ETL: {str(etl_error)}")
+                        
+                        # Paso 3: Actualizar campos ETL en registros nuevos
                         update_etl_sql = f'''
                             UPDATE `{project_id}.{dataset_final}.{table_final}`
                             SET 
                                 _etl_synced = CURRENT_TIMESTAMP(),
                                 _etl_operation = 'INSERT'
-                            WHERE _etl_synced IS NULL OR _etl_synced < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 MINUTE)
+                            WHERE _etl_synced IS NULL
                         '''
                         etl_job = bq_client.query(update_etl_sql)
                         etl_job.result()
