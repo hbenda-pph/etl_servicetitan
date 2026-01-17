@@ -778,9 +778,10 @@ def process_company(row):
             # Registrar paso 4 (MERGE) con error
             print(f"❌ MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
             
-            # Detectar error de incompatibilidad de STRUCT
+            # Detectar error de incompatibilidad de STRUCT (incluye ARRAY<STRUCT>)
             # Formato: "Value of type STRUCT<...> cannot be assigned to T.address, which has type STRUCT<...>"
-            struct_match = re.search(r'cannot be assigned to T\.(\w+), which has type STRUCT', error_msg)
+            # Formato: "Value of type ARRAY<STRUCT<...>> cannot be assigned to T.items, which has type ARRAY<STRUCT<...>>"
+            struct_match = re.search(r'cannot be assigned to T\.(\w+), which has type (?:ARRAY<)?STRUCT', error_msg)
             
             # Detectar error de cambio de tipo de campo (INT64 vs STRING, etc.)
             # Formato: "Value of type INT64 cannot be assigned to T.purchase_order_id, which has type STRING"
