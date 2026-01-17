@@ -241,7 +241,7 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
             return []  # Convertir NULL a array vacío para campos REPEATED
         return None
     
-    # Si es un diccionario/objeto
+    # Si es un diccionario/objeto (STRUCT)
     if isinstance(value, dict):
         # Verificar si este campo debería ser un array (por nombre común)
         # serialNumbers, serial_numbers, etc. deberían ser arrays
@@ -250,45 +250,35 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
             # Si es un objeto pero debería ser array, convertir a array vacío
             return []
         
-        # OPTIMIZACIÓN: Solo procesar recursivamente si hay campos conocidos que necesitan corrección
-        # o si detectamos un problema específico
-        needs_recursive_processing = False
+        # IMPORTANTE: Siempre procesar recursivamente STRUCT para transformar campos a snake_case
+        # Si estamos dentro de un array (field_path indica que viene de un array), 
+        # los campos del STRUCT deben transformarse a snake_case
         fixed_dict = {}
         
         for k, v in value.items():
             snake_key = to_snake_case(k)
             nested_path = f"{field_path}.{snake_key}" if field_path else snake_key
             
-            # Verificar si este campo anidado necesita procesamiento
+            # Verificar si este campo anidado necesita procesamiento especial
             nested_field_lower = nested_path.lower()
             field_name_only = nested_path.split('.')[-1] if '.' in nested_path else nested_path
             
-            # Solo procesar recursivamente si:
-            # 1. El campo está en known_array_fields (necesita corrección de NULL)
-            # 2. Es serialNumbers y viene como objeto (problema conocido)
-            # 3. Es None y podría necesitar corrección
-            if field_name_only in known_array_fields or \
-               ('serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict)) or \
-               v is None:
-                needs_recursive_processing = True
-                if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
-                    fixed_dict[snake_key] = []
-                else:
-                    fixed_dict[snake_key] = fix_nested_value(v, nested_path, known_array_fields)
+            # Procesar recursivamente siempre para STRUCT anidados (transformar a snake_case)
+            # Casos especiales que necesitan tratamiento:
+            if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
+                # serialNumbers como objeto: convertir a array vacío
+                fixed_dict[snake_key] = []
             else:
-                # No necesita procesamiento: copiar tal cual (más rápido)
-                fixed_dict[snake_key] = v
+                # Siempre procesar recursivamente para mantener snake_case consistente
+                fixed_dict[snake_key] = fix_nested_value(v, nested_path, known_array_fields)
         
         return fixed_dict
     
-    # Si es una lista, procesar cada elemento solo si es necesario
+    # Si es una lista (ARRAY), procesar cada elemento recursivamente
+    # Esto es necesario para transformar campos dentro de STRUCT dentro de arrays a snake_case
     if isinstance(value, list):
-        # OPTIMIZACIÓN: Solo procesar recursivamente si hay campos conocidos
-        if known_array_fields:
-            return [fix_nested_value(item, field_path, known_array_fields) for item in value]
-        else:
-            # No hay campos conocidos que necesiten corrección: retornar tal cual
-            return value
+        # IMPORTANTE: Siempre procesar recursivamente arrays para transformar STRUCT internos a snake_case
+        return [fix_nested_value(item, field_path, known_array_fields) for item in value]
     
     # Para otros tipos, retornar tal cual
     return value
@@ -332,8 +322,10 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
                     detected_array_fields.add(to_snake_case(key))
         array_fields = detected_array_fields
     
-    # OPTIMIZACIÓN: Solo usar fix_nested_value si hay campos que necesitan corrección
-    use_recursive_processing = bool(array_fields)
+    # IMPORTANTE: Siempre usar fix_nested_value para transformar todos los campos a snake_case
+    # Esto asegura que STRUCT anidados (como shipTo) y STRUCT dentro de arrays (como items)
+    # se transformen correctamente a snake_case
+    # fix_nested_value ahora es eficiente al solo procesar recursivamente cuando es necesario
     
     # Transformar y limpiar
     with open(temp_path, 'w', encoding='utf-8') as f:
@@ -342,12 +334,9 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             for k, v in item.items():
                 snake_key = to_snake_case(k)
                 
-                if use_recursive_processing:
-                    # Procesar recursivamente solo si hay campos que necesitan corrección
-                    fixed_value = fix_nested_value(v, snake_key, array_fields)
-                else:
-                    # No hay campos que necesiten corrección: copiar tal cual (más rápido)
-                    fixed_value = v
+                # Siempre procesar recursivamente para transformar todos los campos a snake_case
+                # Esto cubre STRUCT simples (shipTo) y STRUCT dentro de arrays (items, customFields)
+                fixed_value = fix_nested_value(v, snake_key, array_fields)
                 
                 # Si el campo es un array y viene como NULL, convertir a array vacío
                 if snake_key in array_fields and fixed_value is None:
