@@ -226,10 +226,10 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
         print(f"❌ Error en logging: {str(e)}")
 
 def fix_nested_value(value, field_path="", known_array_fields=None):
-    """Función recursiva para corregir valores anidados.
-    OPTIMIZADO: Solo procesa recursivamente cuando es necesario (campos conocidos o problemas detectados).
-    Convierte objetos a arrays cuando el campo debería ser array (ej: serialNumbers).
-    También convierte NULL a [] para campos que están en known_array_fields."""
+    """Función recursiva para corregir valores anidados preservando nombres originales.
+    PRINCIPIO BRONZE: Preservar datos exactamente como vienen de la fuente (camelCase).
+    Solo corrige: objetos a arrays cuando es necesario, NULL a [] para campos REPEATED.
+    NO convierte nombres de campos a snake_case - eso se hará en capa silver."""
     if known_array_fields is None:
         known_array_fields = set()
     
@@ -244,33 +244,30 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     # Si es un diccionario/objeto (STRUCT)
     if isinstance(value, dict):
         # Verificar si este campo debería ser un array (por nombre común)
-        # serialNumbers, serial_numbers, etc. deberían ser arrays
+        # serialNumbers debería ser array
         field_name_lower = field_path.lower() if field_path else ""
         if 'serial' in field_name_lower and 'number' in field_name_lower:
             # Si es un objeto pero debería ser array, convertir a array vacío
             return []
         
-        # IMPORTANTE: Siempre procesar recursivamente STRUCT para transformar campos a snake_case
-        # Si estamos dentro de un array (field_path indica que viene de un array), 
-        # los campos del STRUCT deben transformarse a snake_case
+        # PRINCIPIO BRONZE: Preservar nombres originales (camelCase) - NO convertir a snake_case
+        # Solo procesar recursivamente para corregir NULLs y arrays anidados
         fixed_dict = {}
         
         for k, v in value.items():
-            snake_key = to_snake_case(k)
-            nested_path = f"{field_path}.{snake_key}" if field_path else snake_key
+            # Preservar nombre original 'k' (camelCase) - NO convertir a snake_case
+            nested_path = f"{field_path}.{k}" if field_path else k
             
             # Verificar si este campo anidado necesita procesamiento especial
             nested_field_lower = nested_path.lower()
-            field_name_only = nested_path.split('.')[-1] if '.' in nested_path else nested_path
             
-            # Procesar recursivamente siempre para STRUCT anidados (transformar a snake_case)
-            # Casos especiales que necesitan tratamiento:
+            # Procesar recursivamente para corregir NULLs y arrays, pero preservar nombres
             if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
                 # serialNumbers como objeto: convertir a array vacío
-                fixed_dict[snake_key] = []
+                fixed_dict[k] = []  # Preservar nombre original
             else:
-                # Siempre procesar recursivamente para mantener snake_case consistente
-                fixed_dict[snake_key] = fix_nested_value(v, nested_path, known_array_fields)
+                # Procesar recursivamente pero preservar nombre original
+                fixed_dict[k] = fix_nested_value(v, nested_path, known_array_fields)
         
         return fixed_dict
     
@@ -284,7 +281,8 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     return value
 
 def fix_json_format(local_path, temp_path, repeated_fields=None):
-    """Transforma el JSON a formato newline-delimited y snake_case.
+    """Transforma el JSON a formato newline-delimited JSON preservando nombres originales (camelCase).
+    PRINCIPIO: En capa bronze/raw, los datos deben preservarse exactamente como vienen de la fuente.
     Soporta tanto JSON array como newline-delimited JSON.
     Si se proporciona repeated_fields, convierte NULL a [] para esos campos.
     También corrige campos anidados que deberían ser arrays pero vienen como objetos."""
@@ -299,50 +297,45 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
-    # OPTIMIZACIÓN: Solo detectar campos array si no hay repeated_fields proporcionados
-    # Si hay repeated_fields, ya sabemos qué campos necesitan corrección
+    # Detectar campos array (preservando nombres originales, no snake_case)
     if repeated_fields:
         array_fields = set(repeated_fields)
         # También detectar campos array en los datos para casos adicionales
         detected_array_fields = set()
-        # OPTIMIZACIÓN: Solo revisar primeros N registros para detectar (más rápido)
         sample_size = min(100, len(json_data))
         for item in json_data[:sample_size]:
             for key, value in item.items():
                 if isinstance(value, list):
-                    detected_array_fields.add(to_snake_case(key))
+                    detected_array_fields.add(key)  # Preservar nombre original
         array_fields = array_fields | detected_array_fields
     else:
-        # Detectar campos que son arrays - OPTIMIZACIÓN: solo revisar muestra
+        # Detectar campos que son arrays - preservando nombres originales
         detected_array_fields = set()
-        sample_size = min(100, len(json_data))  # Revisar máximo 100 registros
+        sample_size = min(100, len(json_data))
         for item in json_data[:sample_size]:
             for key, value in item.items():
                 if isinstance(value, list):
-                    detected_array_fields.add(to_snake_case(key))
+                    detected_array_fields.add(key)  # Preservar nombre original
         array_fields = detected_array_fields
     
-    # IMPORTANTE: Siempre usar fix_nested_value para transformar todos los campos a snake_case
-    # Esto asegura que STRUCT anidados (como shipTo) y STRUCT dentro de arrays (como items)
-    # se transformen correctamente a snake_case
-    # fix_nested_value ahora es eficiente al solo procesar recursivamente cuando es necesario
+    # PRINCIPIO BRONZE: Preservar datos exactamente como vienen de la fuente
+    # Solo hacer transformaciones necesarias (arrays, NULLs) pero mantener nombres originales (camelCase)
+    # La transformación a snake_case se hará en capa silver
     
-    # Transformar y limpiar
+    # Transformar y limpiar (preservando nombres originales)
     with open(temp_path, 'w', encoding='utf-8') as f:
         for item in json_data:
             new_item = {}
             for k, v in item.items():
-                snake_key = to_snake_case(k)
-                
-                # Siempre procesar recursivamente para transformar todos los campos a snake_case
-                # Esto cubre STRUCT simples (shipTo) y STRUCT dentro de arrays (items, customFields)
-                fixed_value = fix_nested_value(v, snake_key, array_fields)
+                # Preservar nombre original (camelCase) - NO convertir a snake_case
+                # Solo procesar recursivamente para corregir NULLs y arrays anidados
+                fixed_value = fix_nested_value(v, k, array_fields)  # Usar 'k' original, no snake_case
                 
                 # Si el campo es un array y viene como NULL, convertir a array vacío
-                if snake_key in array_fields and fixed_value is None:
-                    new_item[snake_key] = []
+                if k in array_fields and fixed_value is None:
+                    new_item[k] = []  # Preservar nombre original
                 else:
-                    new_item[snake_key] = fixed_value
+                    new_item[k] = fixed_value  # Preservar nombre original
             f.write(json.dumps(new_item) + '\n')
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
@@ -575,10 +568,9 @@ def process_company(row):
                 # Limpiar datos con el campo detectado
                 # Si es un campo anidado (ej: items.serialNumbers), extraer solo el nombre del campo
                 field_name = problematic_field.split('.')[-1] if '.' in problematic_field else problematic_field
-                # Convertir a snake_case para asegurar consistencia
-                field_name_snake = to_snake_case(field_name)
-                print(f"🔧 Campo a limpiar (snake_case): {field_name_snake}")
-                fix_json_format(temp_json, temp_fixed, repeated_fields={field_name_snake})
+                # Usar nombre original (puede ser camelCase o snake_case dependiendo de la fuente)
+                print(f"🔧 Campo a limpiar: {field_name}")
+                fix_json_format(temp_json, temp_fixed, repeated_fields={field_name})
                 
                 # Reintentar carga
                 try:
@@ -801,58 +793,17 @@ def process_company(row):
                             old_struct_field = field
                             break
                     
-                    # Manejar tanto STRUCT como ARRAY<STRUCT> (RECORD REPEATED)
-                    # En BigQuery: ARRAY<STRUCT<...>> se representa como field_type='RECORD', mode='REPEATED'
-                    # Los campos del STRUCT interno están directamente en .fields
-                    is_struct_type = (old_struct_field.field_type in ('STRUCT', 'RECORD') and 
-                                     new_struct_field.field_type in ('STRUCT', 'RECORD'))
-                    is_array = (old_struct_field.mode == 'REPEATED' or new_struct_field.mode == 'REPEATED')
+                    # CRÍTICO: Si hay incompatibilidad de STRUCT, usar el esquema completo de staging
+                    # No fusionar campos - los nombres de campos son diferentes (snake_case vs camelCase)
+                    # BigQuery no puede hacer MERGE cuando los STRUCT tienen nombres de campos diferentes
+                    # La solución es reemplazar completamente el STRUCT con el esquema de staging
+                    print(f"⚠️  Incompatibilidad de STRUCT detectada en {problematic_struct_field}.")
+                    print(f"📋 Reemplazando esquema completo con el de staging (datos ya están en snake_case).")
+                    print(f"   Final tiene campos: {[f.name for f in old_struct_field.fields] if old_struct_field.fields else 'None'}")
+                    print(f"   Staging tiene campos: {[f.name for f in new_struct_field.fields] if new_struct_field.fields else 'None'}")
                     
-                    if old_struct_field and new_struct_field and is_struct_type and \
-                       old_struct_field.fields and new_struct_field.fields:
-                        # Fusionar campos del STRUCT: combinar campos existentes con nuevos
-                        old_fields_dict = {f.name: f for f in old_struct_field.fields}
-                        new_fields_dict = {f.name: f for f in new_struct_field.fields}
-                        
-                        # Combinar: campos existentes primero, luego nuevos campos
-                        merged_fields = []
-                        # IMPORTANTE: Preservar TODOS los campos del final primero (evita error "Field missing in new schema")
-                        for old_field in old_struct_field.fields:
-                            if old_field.name in new_fields_dict:
-                                # Campo existe en ambos: usar el de staging (puede tener cambios)
-                                merged_fields.append(new_fields_dict[old_field.name])
-                            else:
-                                # Campo solo existe en final: PRESERVARLO
-                                merged_fields.append(old_field)
-                        
-                        # Agregar campos nuevos de staging que no están en final
-                        for new_field in new_struct_field.fields:
-                            if new_field.name not in old_fields_dict:
-                                merged_fields.append(new_field)
-                        
-                        # Crear nuevo campo STRUCT/ARRAY con campos fusionados
-                        if is_array:
-                            # ARRAY<STRUCT>: usar RECORD con mode REPEATED
-                            merged_struct_field = bigquery.SchemaField(
-                                problematic_struct_field,
-                                'RECORD',
-                                mode='REPEATED',
-                                fields=merged_fields,
-                                description=old_struct_field.description
-                            )
-                        else:
-                            # STRUCT simple
-                            merged_struct_field = bigquery.SchemaField(
-                                problematic_struct_field,
-                                old_struct_field.field_type,  # STRUCT o RECORD
-                                mode=old_struct_field.mode,
-                                fields=merged_fields,
-                                description=old_struct_field.description
-                            )
-                    else:
-                        # Si no se puede fusionar, preservar el esquema del final para evitar perder campos
-                        print(f"⚠️  No se puede fusionar {problematic_struct_field} (tipos: {old_struct_field.field_type if old_struct_field else 'None'}/{new_struct_field.field_type if new_struct_field else 'None'}). Preservando esquema del final.")
-                        merged_struct_field = old_struct_field
+                    # Usar directamente el esquema de staging (ya tiene snake_case del proceso de transformación)
+                    merged_struct_field = new_struct_field
                     
                     # Reemplazar el campo en el esquema final
                     updated_schema = []
@@ -889,16 +840,36 @@ def process_company(row):
                         print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                         continue  # Continuar al siguiente endpoint
                     
-                    # Reintentar MERGE
+                    # CRÍTICO: Los datos existentes tienen estructura antigua (camelCase)
+                    # No podemos hacer MERGE directo - usar COPY + UPDATE para migrar datos
+                    print(f"🔄 Migrando datos de staging a final (incompatibilidad de STRUCT detectada)...")
                     try:
-                        query_job = bq_client.query(merge_sql)
-                        query_job.result()
+                        # Paso 1: Copiar datos de staging a final (reemplaza completamente)
+                        # Esto reemplaza datos antiguos con camelCase por nuevos con snake_case
+                        copy_job = bq_client.copy_table(
+                            table_ref_staging,
+                            table_ref_final,
+                            job_config=bigquery.CopyJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+                        )
+                        copy_job.result()
+                        print(f"✅ Datos copiados de staging a final (esquema actualizado a snake_case).")
+                        
+                        # Paso 2: Agregar campos ETL a registros nuevos
+                        update_etl_sql = f'''
+                            UPDATE `{project_id}.{dataset_final}.{table_final}`
+                            SET 
+                                _etl_synced = CURRENT_TIMESTAMP(),
+                                _etl_operation = 'INSERT'
+                            WHERE _etl_synced IS NULL OR _etl_synced < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 MINUTE)
+                        '''
+                        etl_job = bq_client.query(update_etl_sql)
+                        etl_job.result()
+                        
                         merge_time = time.time() - merge_start
                         merge_success = True
-                        print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
+                        print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s (migración completa)")
                         
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
-                        # print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
                         
                         log_event_bq(
                             company_id=company_id,
@@ -907,7 +878,7 @@ def process_company(row):
                             endpoint=endpoint_name,
                             event_type="SUCCESS",
                             event_title="MERGE exitoso (después de actualizar STRUCT)",
-                            event_message=f"MERGE ejecutado exitosamente después de actualizar esquema de {problematic_struct_field}"
+                            event_message=f"MERGE ejecutado exitosamente después de actualizar esquema de {problematic_struct_field} (migración completa de datos)"
                         )
                         
                         # Paso 5: Endpoint completado
@@ -915,7 +886,7 @@ def process_company(row):
                         print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
                     except Exception as retry_error:
                         merge_success = False
-                        merge_error_msg = f"Error en MERGE después de actualizar {problematic_struct_field}: {str(retry_error)}"
+                        merge_error_msg = f"Error en migración después de actualizar {problematic_struct_field}: {str(retry_error)}"
                         merge_time = time.time() - merge_start
                         print(f"❌ MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {merge_error_msg}")
                         log_event_bq(
