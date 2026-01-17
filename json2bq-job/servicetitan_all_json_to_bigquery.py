@@ -226,10 +226,10 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
         print(f"❌ Error en logging: {str(e)}")
 
 def fix_nested_value(value, field_path="", known_array_fields=None):
-    """Función recursiva para corregir valores anidados preservando nombres originales.
-    PRINCIPIO BRONZE: Preservar datos exactamente como vienen de la fuente (camelCase).
+    """Función recursiva para corregir valores anidados.
+    IMPORTANTE: Campos dentro de STRUCT preservan camelCase (como vienen de la fuente).
     Solo corrige: objetos a arrays cuando es necesario, NULL a [] para campos REPEATED.
-    NO convierte nombres de campos a snake_case - eso se hará en capa silver."""
+    NO convierte nombres de campos dentro de STRUCT a snake_case."""
     if known_array_fields is None:
         known_array_fields = set()
     
@@ -272,17 +272,17 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
         return fixed_dict
     
     # Si es una lista (ARRAY), procesar cada elemento recursivamente
-    # Esto es necesario para transformar campos dentro de STRUCT dentro de arrays a snake_case
+    # IMPORTANTE: Cuando el array contiene STRUCT, preserva camelCase dentro de esos STRUCT
     if isinstance(value, list):
-        # IMPORTANTE: Siempre procesar recursivamente arrays para transformar STRUCT internos a snake_case
+        # Procesar recursivamente cada elemento del array (preserva camelCase dentro de STRUCT)
         return [fix_nested_value(item, field_path, known_array_fields) for item in value]
     
     # Para otros tipos, retornar tal cual
     return value
 
 def fix_json_format(local_path, temp_path, repeated_fields=None):
-    """Transforma el JSON a formato newline-delimited JSON preservando nombres originales (camelCase).
-    PRINCIPIO: En capa bronze/raw, los datos deben preservarse exactamente como vienen de la fuente.
+    """Transforma el JSON a formato newline-delimited y snake_case.
+    IMPORTANTE: Campos de nivel superior → snake_case, campos dentro de STRUCT → camelCase (preservar fuente).
     Soporta tanto JSON array como newline-delimited JSON.
     Si se proporciona repeated_fields, convierte NULL a [] para esos campos.
     También corrige campos anidados que deberían ser arrays pero vienen como objetos."""
@@ -297,7 +297,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
-    # Detectar campos array (preservando nombres originales, no snake_case)
+    # Detectar campos array (usando snake_case para campos de nivel superior)
     if repeated_fields:
         array_fields = set(repeated_fields)
         # También detectar campos array en los datos para casos adicionales
@@ -306,36 +306,34 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
         for item in json_data[:sample_size]:
             for key, value in item.items():
                 if isinstance(value, list):
-                    detected_array_fields.add(key)  # Preservar nombre original
+                    detected_array_fields.add(to_snake_case(key))  # snake_case para nivel superior
         array_fields = array_fields | detected_array_fields
     else:
-        # Detectar campos que son arrays - preservando nombres originales
+        # Detectar campos que son arrays - usando snake_case para nivel superior
         detected_array_fields = set()
         sample_size = min(100, len(json_data))
         for item in json_data[:sample_size]:
             for key, value in item.items():
                 if isinstance(value, list):
-                    detected_array_fields.add(key)  # Preservar nombre original
+                    detected_array_fields.add(to_snake_case(key))  # snake_case para nivel superior
         array_fields = detected_array_fields
     
-    # PRINCIPIO BRONZE: Preservar datos exactamente como vienen de la fuente
-    # Solo hacer transformaciones necesarias (arrays, NULLs) pero mantener nombres originales (camelCase)
-    # La transformación a snake_case se hará en capa silver
-    
-    # Transformar y limpiar (preservando nombres originales)
+    # IMPORTANTE: Campos de nivel superior → snake_case, campos dentro de STRUCT → camelCase
+    # Transformar y limpiar
     with open(temp_path, 'w', encoding='utf-8') as f:
         for item in json_data:
             new_item = {}
             for k, v in item.items():
-                # Preservar nombre original (camelCase) - NO convertir a snake_case
-                # Solo procesar recursivamente para corregir NULLs y arrays anidados
-                fixed_value = fix_nested_value(v, k, array_fields)  # Usar 'k' original, no snake_case
+                snake_key = to_snake_case(k)  # snake_case para campos de nivel superior
+                
+                # Procesar recursivamente: preserva camelCase dentro de STRUCT
+                fixed_value = fix_nested_value(v, snake_key, array_fields)
                 
                 # Si el campo es un array y viene como NULL, convertir a array vacío
-                if k in array_fields and fixed_value is None:
-                    new_item[k] = []  # Preservar nombre original
+                if snake_key in array_fields and fixed_value is None:
+                    new_item[snake_key] = []
                 else:
-                    new_item[k] = fixed_value  # Preservar nombre original
+                    new_item[snake_key] = fixed_value
             f.write(json.dumps(new_item) + '\n')
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
