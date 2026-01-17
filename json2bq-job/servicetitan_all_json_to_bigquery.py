@@ -812,20 +812,28 @@ def process_company(row):
                             old_struct_field = field
                             break
                     
-                    if old_struct_field and old_struct_field.field_type == 'STRUCT' and new_struct_field.field_type == 'STRUCT':
+                    # Manejar tanto STRUCT como ARRAY<STRUCT> (RECORD REPEATED)
+                    # En BigQuery: ARRAY<STRUCT<...>> se representa como field_type='RECORD', mode='REPEATED'
+                    # Los campos del STRUCT interno están directamente en .fields
+                    is_struct_type = (old_struct_field.field_type in ('STRUCT', 'RECORD') and 
+                                     new_struct_field.field_type in ('STRUCT', 'RECORD'))
+                    is_array = (old_struct_field.mode == 'REPEATED' or new_struct_field.mode == 'REPEATED')
+                    
+                    if old_struct_field and new_struct_field and is_struct_type and \
+                       old_struct_field.fields and new_struct_field.fields:
                         # Fusionar campos del STRUCT: combinar campos existentes con nuevos
                         old_fields_dict = {f.name: f for f in old_struct_field.fields}
                         new_fields_dict = {f.name: f for f in new_struct_field.fields}
                         
                         # Combinar: campos existentes primero, luego nuevos campos
                         merged_fields = []
-                        # Agregar campos existentes (preservar orden y campos que no están en staging)
+                        # IMPORTANTE: Preservar TODOS los campos del final primero (evita error "Field missing in new schema")
                         for old_field in old_struct_field.fields:
                             if old_field.name in new_fields_dict:
                                 # Campo existe en ambos: usar el de staging (puede tener cambios)
                                 merged_fields.append(new_fields_dict[old_field.name])
                             else:
-                                # Campo solo existe en final: preservarlo
+                                # Campo solo existe en final: PRESERVARLO
                                 merged_fields.append(old_field)
                         
                         # Agregar campos nuevos de staging que no están en final
@@ -833,17 +841,29 @@ def process_company(row):
                             if new_field.name not in old_fields_dict:
                                 merged_fields.append(new_field)
                         
-                        # Crear nuevo campo STRUCT con campos fusionados
-                        merged_struct_field = bigquery.SchemaField(
-                            problematic_struct_field,
-                            'STRUCT',
-                            mode=old_struct_field.mode,
-                            fields=merged_fields,
-                            description=old_struct_field.description
-                        )
+                        # Crear nuevo campo STRUCT/ARRAY con campos fusionados
+                        if is_array:
+                            # ARRAY<STRUCT>: usar RECORD con mode REPEATED
+                            merged_struct_field = bigquery.SchemaField(
+                                problematic_struct_field,
+                                'RECORD',
+                                mode='REPEATED',
+                                fields=merged_fields,
+                                description=old_struct_field.description
+                            )
+                        else:
+                            # STRUCT simple
+                            merged_struct_field = bigquery.SchemaField(
+                                problematic_struct_field,
+                                old_struct_field.field_type,  # STRUCT o RECORD
+                                mode=old_struct_field.mode,
+                                fields=merged_fields,
+                                description=old_struct_field.description
+                            )
                     else:
-                        # Si no es STRUCT o no se puede fusionar, usar el campo de staging directamente
-                        merged_struct_field = new_struct_field
+                        # Si no se puede fusionar, preservar el esquema del final para evitar perder campos
+                        print(f"⚠️  No se puede fusionar {problematic_struct_field} (tipos: {old_struct_field.field_type if old_struct_field else 'None'}/{new_struct_field.field_type if new_struct_field else 'None'}). Preservando esquema del final.")
+                        merged_struct_field = old_struct_field
                     
                     # Reemplazar el campo en el esquema final
                     updated_schema = []
