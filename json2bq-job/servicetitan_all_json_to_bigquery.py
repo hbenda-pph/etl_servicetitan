@@ -703,6 +703,49 @@ def process_company(row):
                 print(f"⚠️  Error al actualizar esquema: {str(schema_error)}")
                 print(f"⚠️  Continuando con el MERGE. Si falla, se manejará en el bloque de errores del MERGE.")
         
+        # Asegurar que campos ETL existan antes de construir MERGE SQL
+        final_table_refresh = bq_client.get_table(table_ref_final)
+        has_etl_synced = any(col.name == '_etl_synced' for col in final_table_refresh.schema)
+        has_etl_operation = any(col.name == '_etl_operation' for col in final_table_refresh.schema)
+        
+        if not has_etl_synced or not has_etl_operation:
+            print(f"🔧 Agregando campos ETL faltantes antes del MERGE...")
+            try:
+                if not has_etl_synced:
+                    alter_sql1 = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS _etl_synced TIMESTAMP"
+                    bq_client.query(alter_sql1).result()
+                    print(f"  ✅ Campo _etl_synced agregado")
+                if not has_etl_operation:
+                    alter_sql2 = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS _etl_operation STRING"
+                    bq_client.query(alter_sql2).result()
+                    print(f"  ✅ Campo _etl_operation agregado")
+                
+                # CRÍTICO: Verificar que los campos se agregaron correctamente antes de continuar
+                final_table_refresh = bq_client.get_table(table_ref_final)
+                has_etl_synced = any(col.name == '_etl_synced' for col in final_table_refresh.schema)
+                has_etl_operation = any(col.name == '_etl_operation' for col in final_table_refresh.schema)
+                
+                if not has_etl_synced or not has_etl_operation:
+                    raise Exception(f"CRÍTICO: Campos ETL no se pudieron agregar. _etl_synced: {has_etl_synced}, _etl_operation: {has_etl_operation}. No se puede continuar con MERGE.")
+                    
+            except Exception as etl_error:
+                merge_success = False
+                merge_error_msg = f"Error agregando campos ETL antes del MERGE: {str(etl_error)}"
+                merge_time = time.time() - merge_start
+                print(f"❌ MERGE con Soft Delete no ejecutado para {dataset_final}.{table_final} después de {merge_time:.1f}s: {merge_error_msg}")
+                log_event_bq(
+                    company_id=company_id,
+                    company_name=company_name,
+                    project_id=project_id,
+                    endpoint=endpoint_name,
+                    event_type="ERROR",
+                    event_title="Error agregando campos ETL",
+                    event_message=merge_error_msg
+                )
+                endpoint_time = time.time() - endpoint_start_time
+                print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+                continue  # Continuar al siguiente endpoint
+        
         # Construir UPDATE SET solo con columnas comunes (ahora incluye las nuevas)
         update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
         
@@ -890,32 +933,35 @@ def process_company(row):
                         print(f"✅ Datos copiados de staging a final.")
                         
                         # Paso 2: Agregar campos ETL si no existen (COPY los eliminó)
-                        try:
-                            final_table_check = bq_client.get_table(table_ref_final)
-                            has_etl_synced = any(col.name == '_etl_synced' for col in final_table_check.schema)
-                            has_etl_operation = any(col.name == '_etl_operation' for col in final_table_check.schema)
-                            
-                            if not has_etl_synced or not has_etl_operation:
-                                print(f"🔧 Agregando campos ETL que se perdieron en COPY...")
-                                alter_etl_sql = f'''
-                                    ALTER TABLE `{project_id}.{dataset_final}.{table_final}`
-                                    ADD COLUMN IF NOT EXISTS _etl_synced TIMESTAMP,
-                                    ADD COLUMN IF NOT EXISTS _etl_operation STRING
-                                '''
+                        final_table_check = bq_client.get_table(table_ref_final)
+                        has_etl_synced = any(col.name == '_etl_synced' for col in final_table_check.schema)
+                        has_etl_operation = any(col.name == '_etl_operation' for col in final_table_check.schema)
+                        
+                        if not has_etl_synced or not has_etl_operation:
+                            print(f"🔧 Agregando campos ETL que se perdieron en COPY...")
+                            try:
                                 # BigQuery requiere ADD COLUMN por separado
                                 if not has_etl_synced:
                                     alter_sql1 = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS _etl_synced TIMESTAMP"
-                                    etl_job1 = bq_client.query(alter_sql1)
-                                    etl_job1.result()
+                                    bq_client.query(alter_sql1).result()
+                                    print(f"  ✅ Campo _etl_synced agregado")
                                 if not has_etl_operation:
                                     alter_sql2 = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS _etl_operation STRING"
-                                    etl_job2 = bq_client.query(alter_sql2)
-                                    etl_job2.result()
-                                print(f"✅ Campos ETL agregados.")
-                        except Exception as etl_error:
-                            print(f"⚠️  Error verificando/agregando campos ETL: {str(etl_error)}")
+                                    bq_client.query(alter_sql2).result()
+                                    print(f"  ✅ Campo _etl_operation agregado")
+                                
+                                # Verificar que los campos se agregaron correctamente
+                                final_table_check = bq_client.get_table(table_ref_final)
+                                has_etl_synced = any(col.name == '_etl_synced' for col in final_table_check.schema)
+                                has_etl_operation = any(col.name == '_etl_operation' for col in final_table_check.schema)
+                                
+                                if not has_etl_synced or not has_etl_operation:
+                                    raise Exception(f"Campos ETL no se pudieron agregar correctamente. _etl_synced: {has_etl_synced}, _etl_operation: {has_etl_operation}")
+                                    
+                            except Exception as etl_error:
+                                raise Exception(f"Error agregando campos ETL: {str(etl_error)}")
                         
-                        # Paso 3: Actualizar campos ETL en registros nuevos
+                        # Paso 3: Actualizar campos ETL en registros nuevos (solo si los campos existen)
                         update_etl_sql = f'''
                             UPDATE `{project_id}.{dataset_final}.{table_final}`
                             SET 
