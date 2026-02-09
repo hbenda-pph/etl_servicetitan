@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "servicetitan_all_json_to_bigquery.py"]
+CMD ["python", "servicetitan_all_json_to_bq.py"]

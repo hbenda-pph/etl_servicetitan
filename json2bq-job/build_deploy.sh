@@ -123,8 +123,8 @@ fi
 echo ""
 
 # Verificar que estamos en el directorio correcto
-if [ ! -f "servicetitan_all_json_to_bigquery.py" ]; then
-    echo "❌ Error: servicetitan_all_json_to_bigquery.py no encontrado."
+if [ ! -f "servicetitan_all_json_to_bq.py" ]; then
+    echo "❌ Error: servicetitan_all_json_to_bq.py no encontrado."
     echo "   Ejecuta este script desde el directorio json2bq-job/"
     exit 1
 fi
