@@ -599,8 +599,18 @@ def validate_json_file(file_path, max_lines_to_check=1000):
         tuple: (is_valid: bool, error_message: str or None, json_type: 'array' or 'ndjson' or None)
     """
     try:
+        # Verificar que el archivo existe y no está vacío
+        if not os.path.exists(file_path):
+            return (False, "Archivo no existe", None)
+        
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            return (False, "Archivo JSON vacío", None)
+        
         with open(file_path, 'r', encoding='utf-8') as f:
             first_char = f.read(1)
+            if not first_char:  # Archivo vacío después de leer
+                return (False, "Archivo JSON vacío", None)
             f.seek(0)
             
             if first_char == '[':
