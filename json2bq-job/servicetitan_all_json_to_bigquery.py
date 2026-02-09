@@ -678,7 +678,7 @@ def process_company(row):
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
-        print(f"\n📦 Endpoint: {endpoint_name} (tabla: {table_name})")
+        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) company {company_id}")
         
         # Descargar archivo JSON del bucket
         try:
@@ -892,66 +892,54 @@ def process_company(row):
             if needs_fix and problematic_field:
                 if fix_type == 'type_mismatch':
                     # Error de tipo de dato: necesitamos corregir el esquema
-                    # Estrategia: cargar con autodetect permitiendo errores, obtener esquema, corregirlo y recargar
+                    # Estrategia: obtener esquema de una muestra pequeña, corregir el campo problemático a STRING, y cargar completo
                     try:
                         print(f"🔧 Intentando corregir esquema para campo {problematic_field}...")
                         
-                        # Paso 1: Cargar con autodetect pero permitiendo muchos errores para obtener esquema
-                        temp_config = bigquery.LoadJobConfig(
+                        # Paso 1: Obtener esquema de una muestra pequeña (evita cargar archivo completo que fallará)
+                        sample_file = f"/tmp/sample_{project_id}_{table_name}.json"
+                        with open(temp_fixed, 'r', encoding='utf-8') as f_in:
+                            with open(sample_file, 'w', encoding='utf-8') as f_out:
+                                # Leer primeras 100 líneas para obtener esquema
+                                for i, line in enumerate(f_in):
+                                    if i >= 100:
+                                        break
+                                    f_out.write(line)
+                        
+                        # Cargar muestra para obtener esquema autodetectado
+                        sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample")
+                        sample_config = bigquery.LoadJobConfig(
                             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                             autodetect=True,
-                            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                            max_bad_records=10000  # Permitir muchos errores para que cargue algo
+                            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
                         )
                         
-                        # Intentar cargar (puede fallar pero nos da información)
                         try:
-                            temp_load_job = bq_client.load_table_from_file(
-                                open(temp_fixed, "rb"),
-                                table_ref_staging,
-                                job_config=temp_config
+                            sample_load_job = bq_client.load_table_from_file(
+                                open(sample_file, "rb"),
+                                sample_table_ref,
+                                job_config=sample_config
                             )
-                            temp_load_job.result()
-                            # Si llegamos aquí, la carga funcionó (aunque con errores)
-                            table = bq_client.get_table(table_ref_staging)
-                            schema = table.schema
-                        except Exception as temp_error:
-                            # Si falla completamente, intentar obtener esquema de una muestra pequeña
-                            # Leer solo las primeras líneas (que probablemente no tengan el problema)
-                            sample_file = f"/tmp/sample_{project_id}_{table_name}.json"
-                            with open(temp_fixed, 'r', encoding='utf-8') as f_in:
-                                with open(sample_file, 'w', encoding='utf-8') as f_out:
-                                    # Leer primeras 50 líneas
-                                    for i, line in enumerate(f_in):
-                                        if i >= 50:
-                                            break
-                                        f_out.write(line)
-                            
-                            # Cargar muestra para obtener esquema
-                            sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample")
-                            try:
-                                sample_load_job = bq_client.load_table_from_file(
-                                    open(sample_file, "rb"),
-                                    sample_table_ref,
-                                    job_config=temp_config
-                                )
-                                sample_load_job.result()
-                                sample_table = bq_client.get_table(sample_table_ref)
-                                schema = sample_table.schema
-                                bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                                if os.path.exists(sample_file):
-                                    os.remove(sample_file)
-                            except:
-                                schema = None
-                                if os.path.exists(sample_file):
-                                    os.remove(sample_file)
+                            sample_load_job.result()
+                            sample_table = bq_client.get_table(sample_table_ref)
+                            schema = sample_table.schema
+                            bq_client.delete_table(sample_table_ref, not_found_ok=True)
+                            if os.path.exists(sample_file):
+                                os.remove(sample_file)
+                        except Exception as sample_error:
+                            schema = None
+                            bq_client.delete_table(sample_table_ref, not_found_ok=True)
+                            if os.path.exists(sample_file):
+                                os.remove(sample_file)
+                            raise ValueError(f"No se pudo obtener esquema de muestra: {str(sample_error)}")
                         
-                        # Paso 2: Si tenemos esquema, corregir el campo problemático
+                        # Paso 2: Corregir el campo problemático a STRING en el esquema
                         if schema:
                             corrected_schema = []
+                            field_found = False
                             for field in schema:
                                 if field.name == problematic_field:
-                                    # Cambiar tipo a STRING
+                                    # Cambiar tipo a STRING independientemente del tipo inferido
                                     corrected_field = bigquery.SchemaField(
                                         field.name,
                                         'STRING',
@@ -960,11 +948,15 @@ def process_company(row):
                                         description=field.description
                                     )
                                     corrected_schema.append(corrected_field)
+                                    field_found = True
                                     print(f"✅ Campo {problematic_field} convertido de {field.field_type} a STRING en esquema")
                                 else:
                                     corrected_schema.append(field)
                             
-                            # Paso 3: Borrar tabla si existe y recargar con esquema corregido
+                            if not field_found:
+                                raise ValueError(f"Campo {problematic_field} no encontrado en esquema autodetectado")
+                            
+                            # Paso 3: Borrar tabla staging si existe y cargar archivo completo con esquema corregido
                             bq_client.delete_table(table_ref_staging, not_found_ok=True)
                             
                             fixed_job_config = bigquery.LoadJobConfig(
