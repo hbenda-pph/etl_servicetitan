@@ -17,6 +17,13 @@ from google.cloud import bigquery, storage
 # Configurar logging para suprimir mensajes innecesarios de urllib3/requests sobre gzip
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("google.auth").setLevel(logging.ERROR)  # Suprimir warnings de autenticación
+logging.getLogger("google.auth.transport").setLevel(logging.ERROR)  # Suprimir warnings de autenticación
+
+# Suprimir advertencias específicas de quota project
+import warnings
+warnings.filterwarnings("ignore", message=".*quota project.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*end user credentials.*", category=UserWarning)
 
 # Configuración de BigQuery
 def get_project_source():
