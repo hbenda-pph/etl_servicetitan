@@ -346,7 +346,8 @@ Ejemplos:
     
     # Conectar a BigQuery y obtener la compañía
     print("Conectando a BigQuery para obtener compañía...")
-    client = bigquery.Client()
+    # Usar PROJECT_ID_FOR_QUERY explícitamente para evitar errores de detección automática
+    client = bigquery.Client(project=PROJECT_ID_FOR_QUERY)
     query = f"""
         SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_id = @company_id
