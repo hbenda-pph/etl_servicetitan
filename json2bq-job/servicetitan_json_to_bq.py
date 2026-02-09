@@ -24,7 +24,9 @@ from servicetitan_common import (
     fix_json_format,
     _schema_field_to_sql,
     load_json_to_staging_with_error_handling,
-    validate_json_file
+    validate_json_file,
+    align_schemas_before_merge,
+    execute_merge_or_insert
 )
 
 # Configuración
@@ -240,60 +242,77 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             bq_client.create_table(table)
             print(f"🆕 Tabla final {dataset_final}.{table_final} creada con esquema ETL")
         
-        # MERGE incremental (simplificado para pruebas)
+        # MERGE/INSERT (usando función común)
         merge_start = time.time()
         staging_table = bq_client.get_table(table_ref_staging)
         final_table = bq_client.get_table(table_ref_final)
         staging_schema = staging_table.schema
         final_schema = final_table.schema
         
-        staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
+        # Verificar y corregir incompatibilidades de esquema ANTES del MERGE/INSERT
+        print(f"🔍 Verificando compatibilidad de esquemas entre staging y final...")
+        needs_correction, corrections_made, alignment_error = align_schemas_before_merge(
+            bq_client=bq_client,
+            staging_table=staging_table,
+            final_table=final_table,
+            project_id=project_id,
+            dataset_final=dataset_final,
+            table_final=table_final
+        )
         
-        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
-        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
-        
-        merge_sql = f'''
-            MERGE `{project_id}.{dataset_final}.{table_final}` T
-            USING `{project_id}.{dataset_staging}.{table_staging}` S
-            ON T.id = S.id
-            WHEN MATCHED THEN UPDATE SET 
-                {update_set},
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'UPDATE'
-            WHEN NOT MATCHED THEN INSERT (
-                {', '.join(insert_cols)},
-                _etl_synced, _etl_operation
-            ) VALUES (
-                {', '.join(insert_values)},
-                CURRENT_TIMESTAMP(), 'INSERT'
-            )
-            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'DELETE'
-        '''
-        
-        try:
-            query_job = bq_client.query(merge_sql)
-            query_job.result()
-            merge_time = time.time() - merge_start
-            print(f"🔀 MERGE ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
-            
-            # Limpiar staging
-            bq_client.delete_table(table_ref_staging, not_found_ok=True)
-            
-            endpoint_time = time.time() - endpoint_start_time
-            print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
-        except Exception as e:
-            print(f"❌ Error en MERGE: {str(e)}")
+        if alignment_error:
+            print(f"❌ Error alineando esquemas: {alignment_error}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
                 project_id=project_id,
                 endpoint=endpoint_name,
                 event_type="ERROR",
-                event_title="Error en MERGE",
-                event_message=f"Error en MERGE: {str(e)}",
+                event_title="Error alineando esquemas",
+                event_message=f"Error alineando esquemas antes del MERGE/INSERT: {alignment_error}",
+                source="servicetitan_json_to_bq"
+            )
+            # Continuar de todas formas, la función execute_merge_or_insert puede manejar algunos errores
+        
+        if needs_correction:
+            # Refrescar tabla final después de correcciones
+            final_table = bq_client.get_table(table_ref_final)
+        
+        # Usar función común para ejecutar MERGE o INSERT
+        merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
+            bq_client=bq_client,
+            staging_table=staging_table,
+            final_table=final_table,
+            project_id=project_id,
+            dataset_final=dataset_final,
+            table_final=table_final,
+            dataset_staging=dataset_staging,
+            table_staging=table_staging,
+            merge_start=merge_start,
+            log_event_callback=log_event_bq,
+            company_id=company_id,
+            company_name=company_name,
+            endpoint_name=endpoint_name
+        )
+        
+        if merge_success:
+            # MERGE/INSERT exitoso
+            # Limpiar staging
+            bq_client.delete_table(table_ref_staging, not_found_ok=True)
+            
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
+        else:
+            # MERGE/INSERT falló
+            print(f"❌ Error en MERGE/INSERT: {merge_error_msg}")
+            log_event_bq(
+                company_id=company_id,
+                company_name=company_name,
+                project_id=project_id,
+                endpoint=endpoint_name,
+                event_type="ERROR",
+                event_title="Error en MERGE/INSERT",
+                event_message=f"Error en MERGE/INSERT: {merge_error_msg}",
                 source="servicetitan_json_to_bq"
             )
         

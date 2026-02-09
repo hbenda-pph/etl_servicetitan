@@ -1053,3 +1053,140 @@ def load_json_to_staging_with_error_handling(
         # Si no se pudo corregir, retornar error
         load_time = time.time() - load_start
         return (False, load_time, error_msg)
+
+def execute_merge_or_insert(
+    bq_client, staging_table, final_table, project_id, dataset_final, table_final,
+    dataset_staging, table_staging, merge_start, log_event_callback=None,
+    company_id=None, company_name=None, endpoint_name=None
+):
+    """
+    Ejecuta MERGE o INSERT directo dependiendo de si la tabla final está vacía.
+    
+    Esta función:
+    - Verifica si la tabla final está vacía (primera carga)
+    - Si está vacía: usa INSERT directo (más eficiente)
+    - Si tiene datos: usa MERGE incremental con soft delete
+    
+    Args:
+        bq_client: Cliente de BigQuery
+        staging_table: Tabla de staging (objeto Table)
+        final_table: Tabla final (objeto Table)
+        project_id: ID del proyecto
+        dataset_final: Nombre del dataset final
+        table_final: Nombre de la tabla final
+        dataset_staging: Nombre del dataset staging
+        table_staging: Nombre de la tabla staging
+        merge_start: Tiempo de inicio (time.time())
+        log_event_callback: Función para logging (opcional)
+        company_id, company_name, endpoint_name: Para logging (opcionales)
+    
+    Returns:
+        tuple: (success: bool, merge_time: float, error_message: str or None)
+    """
+    staging_schema = staging_table.schema
+    final_schema = final_table.schema
+    
+    # Obtener nombres de columnas (excluyendo campos ETL y id)
+    staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
+    
+    # Verificar si la tabla final está vacía (primera carga)
+    is_first_load = final_table.num_rows == 0
+    
+    if is_first_load:
+        # Primera carga: usar INSERT directo (más eficiente y evita problemas de MERGE)
+        print(f"📥 Primera carga detectada (tabla vacía). Usando INSERT directo en lugar de MERGE...")
+        
+        # Para INSERT, usar todas las columnas de staging (excepto ETL) + campos ETL
+        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
+        insert_cols_with_etl = insert_cols + ['_etl_synced', '_etl_operation']
+        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
+        insert_values_with_etl = insert_values + ['CURRENT_TIMESTAMP()', "'INSERT'"]
+        
+        insert_sql = f'''
+            INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
+                {', '.join(insert_cols_with_etl)}
+            )
+            SELECT 
+                {', '.join(insert_values_with_etl)}
+            FROM `{project_id}.{dataset_staging}.{table_staging}` S
+        '''
+        
+        try:
+            query_job = bq_client.query(insert_sql)
+            query_job.result()
+            # Obtener número de filas insertadas desde staging
+            from google.cloud.bigquery import TableReference
+            table_ref_staging = TableReference.from_string(f"{project_id}.{dataset_staging}.{table_staging}")
+            staging_table_refresh = bq_client.get_table(table_ref_staging)
+            rows_inserted = staging_table_refresh.num_rows
+            merge_time = time.time() - merge_start
+            print(f"✅ INSERT directo ejecutado: {dataset_final}.{table_final} poblado con {rows_inserted:,} filas en {merge_time:.1f}s")
+            return (True, merge_time, None)
+        except Exception as e:
+            error_msg = str(e)
+            merge_time = time.time() - merge_start
+            print(f"❌ INSERT directo falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
+            if log_event_callback:
+                log_event_callback(
+                    company_id=company_id,
+                    company_name=company_name,
+                    project_id=project_id,
+                    endpoint=endpoint_name,
+                    event_type="ERROR",
+                    event_title="Error en INSERT directo",
+                    event_message=f"Error en INSERT directo: {error_msg}"
+                )
+            return (False, merge_time, error_msg)
+    else:
+        # Tabla tiene datos: usar MERGE incremental
+        print(f"🔄 Tabla tiene datos. Usando MERGE incremental...")
+        
+        # Construir UPDATE SET solo con columnas comunes
+        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
+        
+        # Para INSERT, usar todas las columnas de staging (excepto ETL)
+        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
+        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
+        
+        # MERGE incremental a tabla final con Soft Delete y campos ETL
+        merge_sql = f'''
+            MERGE `{project_id}.{dataset_final}.{table_final}` T
+            USING `{project_id}.{dataset_staging}.{table_staging}` S
+            ON T.id = S.id
+            WHEN MATCHED THEN UPDATE SET 
+                {update_set},
+                T._etl_synced = CURRENT_TIMESTAMP(),
+                T._etl_operation = 'UPDATE'
+            WHEN NOT MATCHED THEN INSERT (
+                {', '.join(insert_cols)},
+                _etl_synced, _etl_operation
+            ) VALUES (
+                {', '.join(insert_values)},
+                CURRENT_TIMESTAMP(), 'INSERT'
+            )
+            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
+                T._etl_synced = CURRENT_TIMESTAMP(),
+                T._etl_operation = 'DELETE'
+        '''
+        
+        try:
+            query_job = bq_client.query(merge_sql)
+            query_job.result()
+            merge_time = time.time() - merge_start
+            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
+            return (True, merge_time, None)
+        except Exception as e:
+            error_msg = str(e)
+            merge_time = time.time() - merge_start
+            print(f"❌ MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
+            if log_event_callback:
+                log_event_callback(
+                    company_id=company_id,
+                    company_name=company_name,
+                    project_id=project_id,
+                    endpoint=endpoint_name,
+                    event_type="ERROR",
+                    event_title="Error en MERGE",
+                    event_message=f"Error en MERGE: {error_msg}"
+                )
+            return (False, merge_time, error_msg)

@@ -19,7 +19,8 @@ from servicetitan_common import (
     to_snake_case,
     load_json_to_staging_with_error_handling,
     validate_json_file,
-    align_schemas_before_merge
+    align_schemas_before_merge,
+    execute_merge_or_insert
 )
 
 PROJECT_SOURCE = get_project_source()
@@ -421,50 +422,32 @@ def process_company(row):
                 print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                 continue  # Continuar al siguiente endpoint
         
-        # Construir UPDATE SET solo con columnas comunes (ahora incluye las nuevas)
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
+        # Usar función común para ejecutar MERGE o INSERT
+        merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
+            bq_client=bq_client,
+            staging_table=staging_table,
+            final_table=final_table,
+            project_id=project_id,
+            dataset_final=dataset_final,
+            table_final=table_final,
+            dataset_staging=dataset_staging,
+            table_staging=table_staging,
+            merge_start=merge_start,
+            log_event_callback=log_event_bq_all,
+            company_id=company_id,
+            company_name=company_name,
+            endpoint_name=endpoint_name
+        )
         
-        # Para INSERT, usar todas las columnas de staging (excepto ETL)
-        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
-        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
-        
-        # MERGE incremental a tabla final con Soft Delete y campos ETL
-        merge_sql = f'''
-            MERGE `{project_id}.{dataset_final}.{table_final}` T
-            USING `{project_id}.{dataset_staging}.{table_staging}` S
-            ON T.id = S.id
-            WHEN MATCHED THEN UPDATE SET 
-                {update_set},
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'UPDATE'
-            WHEN NOT MATCHED THEN INSERT (
-                {', '.join(insert_cols)},
-                _etl_synced, _etl_operation
-            ) VALUES (
-                {', '.join(insert_values)},
-                CURRENT_TIMESTAMP(), 'INSERT'
-            )
-            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'DELETE'
-        '''
-        
-        try:
-            query_job = bq_client.query(merge_sql)
-            query_job.result()
-            merge_time = time.time() - merge_start
-            merge_success = True
-            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
-            
-            # Paso 5: Endpoint completado (solo cuando MERGE es exitoso)
+        if merge_success:
+            # MERGE/INSERT exitoso
+            # Paso 5: Endpoint completado (solo cuando MERGE/INSERT es exitoso)
             endpoint_time = time.time() - endpoint_start_time
             print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
-        except Exception as e:
-            error_msg = str(e)
-            merge_error_msg = error_msg
-            merge_time = time.time() - merge_start
-            # Registrar paso 4 (MERGE) con error
-            print(f"❌ MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
+        else:
+            # MERGE/INSERT falló - el error ya está en merge_error_msg
+            # Continuar con manejo de errores más abajo (estructura de STRUCT, tipos, etc.)
+            error_msg = merge_error_msg
             
             # Detectar error de incompatibilidad de STRUCT (incluye ARRAY<STRUCT>)
             # Formato: "Value of type STRUCT<...> cannot be assigned to T.address, which has type STRUCT<...>"
@@ -670,7 +653,7 @@ def process_company(row):
                             event_type="ERROR",
                             event_title="Error en MERGE (después de actualizar STRUCT)",
                             event_message=merge_error_msg,
-                            info={"merge_sql": merge_sql}
+                            info={"operation": "MERGE/INSERT"}
                         )
                         endpoint_time = time.time() - endpoint_start_time
                         print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
@@ -684,7 +667,7 @@ def process_company(row):
                         event_type="ERROR",
                         event_title="Error en MERGE",
                         event_message=f"Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging. {error_msg}",
-                        info={"merge_sql": merge_sql}
+                        info={"operation": "MERGE/INSERT"}
                     )
                     merge_success = False
                     merge_time = time.time() - merge_start
@@ -745,13 +728,28 @@ def process_company(row):
                         print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                         continue  # Continuar al siguiente endpoint
                     
-                    # Reintentar MERGE
+                    # Reintentar MERGE/INSERT usando función común
                     try:
-                        query_job = bq_client.query(merge_sql)
-                        query_job.result()
-                        merge_time = time.time() - merge_start
-                        merge_success = True
-                        print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
+                        # Refrescar tablas después de actualizar esquema
+                        staging_table = bq_client.get_table(table_ref_staging)
+                        final_table = bq_client.get_table(table_ref_final)
+                        merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
+                            bq_client=bq_client,
+                            staging_table=staging_table,
+                            final_table=final_table,
+                            project_id=project_id,
+                            dataset_final=dataset_final,
+                            table_final=table_final,
+                            dataset_staging=dataset_staging,
+                            table_staging=table_staging,
+                            merge_start=merge_start,
+                            log_event_callback=log_event_bq_all,
+                            company_id=company_id,
+                            company_name=company_name,
+                            endpoint_name=endpoint_name
+                        )
+                        if merge_success:
+                            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
                         
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
                         # print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
@@ -782,7 +780,7 @@ def process_company(row):
                             event_type="ERROR",
                             event_title="Error en MERGE (después de actualizar tipo)",
                             event_message=merge_error_msg,
-                            info={"merge_sql": merge_sql}
+                            info={"operation": "MERGE/INSERT"}
                         )
                         endpoint_time = time.time() - endpoint_start_time
                         print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
@@ -795,7 +793,7 @@ def process_company(row):
                         event_type="ERROR",
                         event_title="Error en MERGE",
                         event_message=f"Error en MERGE: campo {problematic_field} no encontrado en staging. {error_msg}",
-                        info={"merge_sql": merge_sql}
+                        info={"operation": "MERGE/INSERT"}
                     )
                     merge_success = False
                     merge_time = time.time() - merge_start
@@ -892,13 +890,28 @@ def process_company(row):
                                 print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                                 continue  # Continuar al siguiente endpoint
                             
-                            # Reintentar MERGE
+                            # Reintentar MERGE/INSERT usando función común
                             try:
-                                query_job = bq_client.query(merge_sql)
-                                query_job.result()
-                                merge_time = time.time() - merge_start
-                                merge_success = True
-                                print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
+                                # Refrescar tablas después de fusionar STRUCT
+                                staging_table = bq_client.get_table(table_ref_staging)
+                                final_table = bq_client.get_table(table_ref_final)
+                                merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
+                                    bq_client=bq_client,
+                                    staging_table=staging_table,
+                                    final_table=final_table,
+                                    project_id=project_id,
+                                    dataset_final=dataset_final,
+                                    table_final=table_final,
+                                    dataset_staging=dataset_staging,
+                                    table_staging=table_staging,
+                                    merge_start=merge_start,
+                                    log_event_callback=log_event_bq_all,
+                                    company_id=company_id,
+                                    company_name=company_name,
+                                    endpoint_name=endpoint_name
+                                )
+                                if merge_success:
+                                    print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
                                 bq_client.delete_table(table_ref_staging, not_found_ok=True)
                                 print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
                                 log_event_bq_all(
@@ -940,7 +953,7 @@ def process_company(row):
                                 event_type="ERROR",
                                 event_title="Error en MERGE",
                                 event_message=f"Error en MERGE: no se pudo fusionar campo {missing_field_path}. {error_msg}",
-                                info={"merge_sql": merge_sql}
+                                info={"operation": "MERGE/INSERT"}
                             )
                             merge_success = False
                             merge_time = time.time() - merge_start
@@ -957,7 +970,7 @@ def process_company(row):
                             event_type="ERROR",
                             event_title="Error en MERGE",
                             event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",
-                            info={"merge_sql": merge_sql}
+                            info={"operation": "MERGE/INSERT"}
                         )
                         merge_success = False
                         merge_time = time.time() - merge_start
