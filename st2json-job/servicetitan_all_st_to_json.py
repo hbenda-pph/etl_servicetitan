@@ -8,7 +8,12 @@ import shutil
 import re
 import gzip
 import io
+import logging
 from google.cloud import bigquery, storage
+
+# Configurar logging para suprimir mensajes innecesarios de urllib3/requests sobre gzip
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
 
 # Configuración de BigQuery
 # Detectar proyecto automáticamente desde variable de entorno o metadata del service account
@@ -543,6 +548,158 @@ class ServiceTitanAuth:
         
         return total_records, continue_from
 
+    def get_data_streaming(self, api_url_base, api_data, output_file):
+        """
+        Método para endpoints grandes - escribe directamente a archivo para evitar problemas de memoria.
+        Usa paginación estándar (page/pageSize) pero escribe cada página directamente al archivo.
+        """
+        page_size = 5000
+        total_records = 0
+        page = 1
+        
+        # Determinar qué parámetros acepta el endpoint (solo en primera página)
+        use_active_param = True
+        use_pagination = True
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write('[\n')
+            first_item = True
+            
+            # Intentar diferentes combinaciones solo en la primera página
+            while True:
+                token = self.get_access_token()
+                success = False
+                response = None
+                
+                # Estrategia 1: Intentar con active=Any + paginación
+                if page == 1 and use_active_param and use_pagination:
+                    query_params = {'page': page, 'pageSize': page_size, 'active': 'Any'}
+                    url = self._build_api_url(api_url_base, api_data, query_params=query_params)
+                    response = requests.get(
+                        url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key'],
+                            'Accept': 'application/json',
+                            'Connection': 'keep-alive'
+                        },
+                        timeout=(30, 600),
+                        stream=True
+                    )
+                    if response.status_code == 200:
+                        success = True
+                    elif response.status_code == 404:
+                        use_active_param = False
+                
+                # Estrategia 2: Intentar sin active=Any pero con paginación
+                if not success and page == 1 and use_pagination:
+                    query_params = {'page': page, 'pageSize': page_size}
+                    url = self._build_api_url(api_url_base, api_data, query_params=query_params)
+                    response = requests.get(
+                        url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key'],
+                            'Accept': 'application/json',
+                            'Connection': 'keep-alive'
+                        },
+                        timeout=(30, 600),
+                        stream=True
+                    )
+                    if response.status_code == 200:
+                        success = True
+                    elif response.status_code == 404:
+                        use_pagination = False
+                        use_active_param = False
+                
+                # Estrategia 3: Intentar sin parámetros
+                if not success and page == 1 and not use_pagination:
+                    url = self._build_api_url(api_url_base, api_data, query_params=None)
+                    response = requests.get(
+                        url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key'],
+                            'Accept': 'application/json',
+                            'Connection': 'keep-alive'
+                        },
+                        timeout=(30, 600),
+                        stream=True
+                    )
+                    if response.status_code == 200:
+                        success = True
+                
+                # Para páginas siguientes
+                if not success and page > 1:
+                    query_params = {'page': page, 'pageSize': page_size}
+                    if use_active_param:
+                        query_params['active'] = 'Any'
+                    url = self._build_api_url(api_url_base, api_data, query_params=query_params)
+                    response = requests.get(
+                        url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key'],
+                            'Accept': 'application/json',
+                            'Connection': 'keep-alive'
+                        },
+                        timeout=(30, 600),
+                        stream=True
+                    )
+                    if response.status_code == 200:
+                        success = True
+                
+                if not success:
+                    response.raise_for_status()
+                
+                # Procesar respuesta
+                try:
+                    response_content = response.raw.read()
+                    content_encoding = response.headers.get('Content-Encoding', '').lower()
+                    if content_encoding == 'gzip':
+                        response_content = gzip.decompress(response_content)
+                    response_text = response_content.decode('utf-8')
+                    result = json.loads(response_text)
+                except Exception as e:
+                    error_msg = f"Error procesando respuesta en página {page}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    raise ValueError(error_msg) from e
+                
+                # Extraer items de la página
+                if isinstance(result, list):
+                    page_items = result
+                else:
+                    page_items = result.get("data", [])
+                
+                if not page_items:
+                    break
+                
+                # Escribir items directamente al archivo
+                for item in page_items:
+                    if not first_item:
+                        f.write(',\n')
+                    json.dump(item, f, ensure_ascii=False, indent=2)
+                    first_item = False
+                
+                total_records += len(page_items)
+                
+                # Si no estamos usando paginación, solo una llamada
+                if not use_pagination:
+                    break
+                
+                # Si estamos usando paginación, verificar si hay más páginas
+                if len(page_items) < page_size:
+                    break
+                page += 1
+            
+            f.write('\n]')
+        
+        return total_records
+
 # Cache para nombres de tablas (evita consultas repetidas)
 _table_name_cache = {}
 
@@ -654,6 +811,10 @@ def process_company(row):
             filename_ts = f"servicetitan_{table_name}_{timestamp}.json"
             filename_alias = f"servicetitan_{table_name}.json"
             
+            # Lista de endpoints grandes que requieren streaming para evitar problemas de memoria
+            # Estos endpoints generan respuestas muy grandes y pueden causar SIGKILL si se cargan en memoria
+            LARGE_ENDPOINTS = ["gross-pay-items"]
+            
             # Detectar si es endpoint export (usa from/continueFrom) o normal (usa page)
             if api_data.startswith("export/"):
                 # Endpoint EXPORT: usa continueFrom para paginación
@@ -662,6 +823,13 @@ def process_company(row):
                 print(f"📊 [EXPORT MODE] Total registros descargados: {total}")
                 if continue_token:
                     print(f"🔖 [EXPORT MODE] Token para próxima ejecución: {continue_token}")
+                # Copiar para archivo con timestamp
+                shutil.copy2(filename_alias, filename_ts)
+            elif api_data in LARGE_ENDPOINTS or any(large in api_data for large in LARGE_ENDPOINTS):
+                # Endpoint GRANDE: usar streaming para evitar problemas de memoria
+                print(f"📥 [STREAMING MODE] Usando streaming para endpoint grande: {api_data}")
+                total = st_client.get_data_streaming(api_url_base, api_data, filename_alias)
+                print(f"📊 [STREAMING MODE] Total registros descargados: {total}")
                 # Copiar para archivo con timestamp
                 shutil.copy2(filename_alias, filename_ts)
             else:
