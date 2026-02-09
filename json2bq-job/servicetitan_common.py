@@ -381,7 +381,8 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
 
 def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
     """Versión streaming de fix_json_format para archivos grandes.
-    Procesa línea por línea para evitar cargar todo en memoria."""
+    Procesa línea por línea para evitar cargar todo en memoria.
+    Usa json.JSONDecoder para parsear JSON arrays de forma incremental."""
     
     items_processed = 0
     start_time = time.time()
@@ -395,31 +396,41 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
             f.seek(0)
             
             if first_char == '[':
-                # JSON array - leer primeros items
-                content = f.read(1024 * 1024)  # Leer primeros 1MB
-                try:
-                    # Intentar parsear parcialmente
-                    bracket_count = 0
-                    items = []
-                    current_item = ""
-                    for char in content:
-                        current_item += char
-                        if char == '[':
-                            bracket_count += 1
-                        elif char == ']':
-                            bracket_count -= 1
-                        elif char == ',' and bracket_count == 1:
-                            # Fin de un item
-                            try:
-                                item = json.loads(current_item.rstrip(','))
-                                items.append(item)
-                                if len(items) >= 100:
-                                    break
-                            except:
-                                pass
-                            current_item = ""
-                except:
-                    pass
+                # JSON array - leer primeros items usando decoder incremental
+                decoder = json.JSONDecoder()
+                buffer = ""
+                items = []
+                chunk_size = 1024 * 1024  # 1MB chunks
+                
+                # Leer primer chunk
+                chunk = f.read(chunk_size)
+                if chunk:
+                    buffer = chunk
+                    idx = 0
+                    # Saltar el '[' inicial
+                    if buffer[idx] == '[':
+                        idx += 1
+                    
+                    # Parsear items hasta tener 100 o terminar el chunk
+                    while idx < len(buffer) and len(items) < 100:
+                        # Buscar el siguiente item
+                        buffer = buffer[idx:].lstrip()
+                        if not buffer or buffer[0] == ']':
+                            break
+                        
+                        try:
+                            obj, idx = decoder.raw_decode(buffer)
+                            items.append(obj)
+                            # Avanzar después del item (saltar coma si existe)
+                            buffer = buffer[idx:].lstrip()
+                            if buffer and buffer[0] == ',':
+                                buffer = buffer[1:].lstrip()
+                            idx = 0
+                        except (ValueError, json.JSONDecodeError):
+                            # Necesitamos más datos, pero ya tenemos suficientes items
+                            if len(items) >= 10:
+                                break
+                            break
             else:
                 # Newline-delimited JSON - leer primeras líneas
                 items = []
@@ -433,87 +444,81 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
         
         # Detectar campos array
         for item in items:
-            for k, v in item.items():
-                snake_key = to_snake_case(k)
-                if isinstance(v, list):
-                    repeated_fields.add(snake_key)
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    snake_key = to_snake_case(k)
+                    if isinstance(v, list):
+                        repeated_fields.add(snake_key)
     
-    # Procesar archivo completo línea por línea
+    # Procesar archivo completo
     with open(local_path, 'r', encoding='utf-8') as f_in:
         with open(temp_path, 'w', encoding='utf-8') as f_out:
             first_char = f_in.read(1)
             f_in.seek(0)
             
             if first_char == '[':
-                # JSON array - procesar streaming
-                bracket_count = 0
-                current_item = ""
-                in_string = False
-                escape_next = False
+                # JSON array - usar decoder incremental para parsear streaming
+                decoder = json.JSONDecoder()
+                buffer = ""
+                chunk_size = 64 * 1024  # 64KB chunks para balance entre memoria y eficiencia
+                array_started = False
                 
-                for char in f_in.read():
-                    if escape_next:
-                        current_item += char
-                        escape_next = False
-                        continue
+                # Leer y procesar en chunks
+                while True:
+                    chunk = f_in.read(chunk_size)
+                    if not chunk and not buffer:
+                        break
                     
-                    if char == '\\':
-                        escape_next = True
-                        current_item += char
-                        continue
+                    if chunk:
+                        buffer += chunk
                     
-                    if char == '"' and not escape_next:
-                        in_string = not in_string
+                    # Si es el primer chunk, saltar el '[' inicial
+                    if not array_started and buffer:
+                        buffer = buffer.lstrip()
+                        if buffer and buffer[0] == '[':
+                            buffer = buffer[1:].lstrip()
+                            array_started = True
+                        elif buffer and buffer[0] == ']':
+                            # Array vacío
+                            break
                     
-                    if not in_string:
-                        if char == '[':
-                            bracket_count += 1
-                            if bracket_count == 1:
-                                current_item = ""
-                                continue
-                        elif char == ']':
-                            bracket_count -= 1
-                            if bracket_count == 0 and current_item.strip():
-                                # Fin del array
-                                try:
-                                    item = json.loads(current_item.strip().rstrip(','))
-                                    transformed = transform_item(item, repeated_fields)
-                                    f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
-                                    items_processed += 1
-                                    
-                                    # Mostrar progreso cada 10 segundos
-                                    current_time = time.time()
-                                    if current_time - last_progress_time >= 10:
-                                        elapsed = current_time - start_time
-                                        rate = items_processed / elapsed if elapsed > 0 else 0
-                                        print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
-                                        last_progress_time = current_time
-                                except:
-                                    pass
-                                current_item = ""
-                                continue
-                        elif char == ',' and bracket_count == 1:
-                            # Fin de un item
-                            if current_item.strip():
-                                try:
-                                    item = json.loads(current_item.strip())
-                                    transformed = transform_item(item, repeated_fields)
-                                    f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
-                                    items_processed += 1
-                                    
-                                    # Mostrar progreso cada 10 segundos
-                                    current_time = time.time()
-                                    if current_time - last_progress_time >= 10:
-                                        elapsed = current_time - start_time
-                                        rate = items_processed / elapsed if elapsed > 0 else 0
-                                        print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
-                                        last_progress_time = current_time
-                                except:
-                                    pass
-                            current_item = ""
-                            continue
+                    # Parsear todos los items completos en el buffer
+                    while buffer:
+                        buffer = buffer.lstrip()
+                        if not buffer or buffer[0] == ']':
+                            break
+                        
+                        try:
+                            obj, consumed = decoder.raw_decode(buffer)
+                            transformed = transform_item(obj, repeated_fields)
+                            f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
+                            items_processed += 1
+                            
+                            # Avanzar después del item
+                            buffer = buffer[consumed:].lstrip()
+                            # Saltar coma si existe
+                            if buffer and buffer[0] == ',':
+                                buffer = buffer[1:].lstrip()
+                            
+                            # Mostrar progreso cada 10 segundos
+                            current_time = time.time()
+                            if current_time - last_progress_time >= 10:
+                                elapsed = current_time - start_time
+                                rate = items_processed / elapsed if elapsed > 0 else 0
+                                print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
+                                last_progress_time = current_time
+                        except (ValueError, json.JSONDecodeError) as e:
+                            # Item incompleto, necesitamos más datos del siguiente chunk
+                            # Si no hay más chunk, puede ser un error real
+                            if not chunk:
+                                if items_processed == 0:
+                                    print(f"⚠️  Error parseando JSON: {str(e)[:200]}")
+                                break
+                            break
                     
-                    current_item += char
+                    # Si no hay más datos y el buffer está vacío o solo tiene ']', terminamos
+                    if not chunk:
+                        break
             else:
                 # Newline-delimited JSON - más simple
                 for line in f_in:
@@ -531,11 +536,17 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                                 rate = items_processed / elapsed if elapsed > 0 else 0
                                 print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
                                 last_progress_time = current_time
-                        except:
+                        except Exception as e:
+                            # Log error pero continuar
+                            if items_processed == 0:
+                                print(f"⚠️  Error parseando línea: {str(e)[:100]}")
                             pass
     
     total_time = time.time() - start_time
-    print(f"✅ Transformación completada: {items_processed:,} items procesados en {total_time:.1f}s ({items_processed/total_time:.0f} items/seg)")
+    if items_processed == 0:
+        print(f"❌ ERROR: No se procesaron items. El archivo puede estar vacío o mal formado.")
+    else:
+        print(f"✅ Transformación completada: {items_processed:,} items procesados en {total_time:.1f}s ({items_processed/total_time:.0f} items/seg)")
 
 def transform_item(item, array_fields):
     """Transforma un item individual a snake_case en nivel superior, preserva camelCase en STRUCT."""
