@@ -433,7 +433,17 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                 detected_array_fields.add(to_snake_case(key))
     array_fields = array_fields | detected_array_fields
     
+    # Obtener tamaño del archivo para mostrar progreso
+    file_size = os.path.getsize(local_path)
+    file_size_mb = file_size / (1024 * 1024)
+    print(f"📊 Procesando archivo grande ({file_size_mb:.2f} MB) con streaming...")
+    
     # Procesar archivo completo de forma streaming
+    start_time = time.time()
+    items_processed = 0
+    bytes_processed = 0
+    last_progress_time = start_time
+    
     with open(local_path, 'r', encoding='utf-8') as f_in, open(temp_path, 'w', encoding='utf-8') as f_out:
         first_char = f_in.read(1)
         f_in.seek(0)
@@ -441,7 +451,8 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
         if first_char == '[':
             # JSON array tradicional - procesar item por item usando parser streaming
             # Leer en chunks y parsear objetos JSON completos
-            chunk_size = 64 * 1024  # 64KB chunks
+            # Usar chunks más grandes para archivos muy grandes (mejor rendimiento)
+            chunk_size = 256 * 1024 if file_size_mb > 500 else 64 * 1024  # 256KB para archivos >500MB, 64KB para otros
             buffer = ""
             depth = 0
             item_start = None
@@ -454,6 +465,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                 if not chunk:
                     break
                 
+                bytes_processed += len(chunk)
                 buffer += chunk
                 
                 i = 0
@@ -500,6 +512,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                                         item = json.loads(item_str)
                                         new_item = transform_item(item, array_fields)
                                         f_out.write(json.dumps(new_item) + '\n')
+                                        items_processed += 1
                                 except:
                                     pass
                             buffer = buffer[i+1:]
@@ -514,6 +527,15 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                                 item = json.loads(item_str)
                                 new_item = transform_item(item, array_fields)
                                 f_out.write(json.dumps(new_item) + '\n')
+                                items_processed += 1
+                                
+                                # Mostrar progreso cada 10,000 items o cada 30 segundos
+                                current_time = time.time()
+                                if items_processed % 10000 == 0 or (current_time - last_progress_time) >= 30:
+                                    progress_pct = (bytes_processed / file_size * 100) if file_size > 0 else 0
+                                    elapsed = current_time - start_time
+                                    print(f"⏳ Progreso: {items_processed:,} items procesados ({progress_pct:.1f}% del archivo, {elapsed:.1f}s)")
+                                    last_progress_time = current_time
                         except:
                             pass
                         item_start = None
@@ -524,15 +546,28 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                     i += 1
         else:
             # Newline-delimited JSON - procesar línea por línea (más eficiente)
-            for line in f_in:
+            for line_num, line in enumerate(f_in, 1):
                 if line.strip():
                     try:
                         item = json.loads(line)
                         new_item = transform_item(item, array_fields)
                         f_out.write(json.dumps(new_item) + '\n')
+                        items_processed += 1
+                        bytes_processed += len(line.encode('utf-8'))
+                        
+                        # Mostrar progreso cada 10,000 líneas o cada 30 segundos
+                        current_time = time.time()
+                        if items_processed % 10000 == 0 or (current_time - last_progress_time) >= 30:
+                            progress_pct = (bytes_processed / file_size * 100) if file_size > 0 else 0
+                            elapsed = current_time - start_time
+                            print(f"⏳ Progreso: {items_processed:,} items procesados ({progress_pct:.1f}% del archivo, {elapsed:.1f}s)")
+                            last_progress_time = current_time
                     except Exception as e:
                         # Continuar con la siguiente línea si hay error
                         pass
+    
+    total_time = time.time() - start_time
+    print(f"✅ Transformación completada: {items_processed:,} items procesados en {total_time:.1f}s ({items_processed/total_time:.0f} items/seg)")
 
 def transform_item(item, array_fields):
     """Transforma un item individual a snake_case en nivel superior, preserva camelCase en STRUCT."""
@@ -693,9 +728,13 @@ def process_company(row):
         # Transformar a newline-delimited y snake_case (primera pasada)
         try:
             transform_start = time.time()
+            file_size_mb = os.path.getsize(temp_json) / (1024 * 1024)
+            if file_size_mb > 100:
+                print(f"🔄 Transformando archivo grande ({file_size_mb:.2f} MB) a newline-delimited y snake_case (esto puede tomar varios minutos)...")
             fix_json_format(temp_json, temp_fixed)
             transform_time = time.time() - transform_start
-            print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
+            if file_size_mb <= 100:
+                print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
         except Exception as e:
             print(f"❌ Error transformando {json_filename}: {str(e)}")
             log_event_bq(
