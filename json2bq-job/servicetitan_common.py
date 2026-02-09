@@ -30,8 +30,10 @@ def get_project_source():
     Prioridad:
     1. Variable de entorno GCP_PROJECT (establecida por Cloud Run Jobs)
     2. Variable de entorno GOOGLE_CLOUD_PROJECT
-    3. Proyecto por defecto del cliente BigQuery
-    4. Fallback hardcoded según ambiente detectado
+    3. Proyecto desde gcloud config (para ejecución local) - MÁS CONFIABLE
+    4. Proyecto desde Application Default Credentials
+    5. Proyecto del cliente BigQuery
+    6. Fallback: usar DEV (más seguro que QUA)
     """
     # Cloud Run Jobs establece GCP_PROJECT automáticamente
     project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
@@ -39,15 +41,70 @@ def get_project_source():
     if project:
         return project
     
-    # Si no hay variable de entorno, intentar detectar desde el cliente
+    # PRIORIDAD: Intentar obtener desde gcloud config (para ejecución local)
+    # Esto es más confiable porque refleja el proyecto activo del usuario
     try:
-        client = bigquery.Client()
-        return client.project
+        import subprocess
+        result = subprocess.run(
+            ['gcloud', 'config', 'get-value', 'project'],
+            capture_output=True,
+            text=True,
+            timeout=3
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            project = result.stdout.strip()
+            if project:
+                # Validar que sea uno de los proyectos conocidos
+                known_projects = [
+                    'platform-partners-des',  # DEV
+                    'platform-partners-qua',  # QUA
+                    'platform-partners-pro',  # PRO (project name)
+                    'constant-height-455614-i0'  # PRO (project id)
+                ]
+                if project in known_projects:
+                    return project
+                # Si no es conocido, igualmente usarlo (puede ser un proyecto de prueba)
+                return project
+    except Exception as e:
+        # Si gcloud no está disponible o hay error, continuar con otros métodos
+        pass
+    
+    # Intentar obtener desde Application Default Credentials
+    try:
+        from google.auth import default
+        credentials, project = default()
+        if project:
+            # Validar que sea uno de los proyectos conocidos
+            known_projects = [
+                'platform-partners-des',
+                'platform-partners-qua',
+                'platform-partners-pro',
+                'constant-height-455614-i0'
+            ]
+            if project in known_projects:
+                return project
     except:
         pass
     
-    # Fallback: detectar desde service account o usar default
-    return "platform-partners-qua"  # Fallback por defecto
+    # Intentar detectar desde el cliente BigQuery
+    try:
+        client = bigquery.Client()
+        detected_project = client.project
+        if detected_project:
+            # Validar que sea uno de los proyectos conocidos
+            known_projects = [
+                'platform-partners-des',
+                'platform-partners-qua',
+                'platform-partners-pro',
+                'constant-height-455614-i0'
+            ]
+            if detected_project in known_projects:
+                return detected_project
+    except:
+        pass
+    
+    # Último recurso: usar DEV (más seguro que QUA como fallback)
+    return "platform-partners-des"  # Fallback a DEV
 
 def get_bigquery_project_id():
     """
@@ -71,7 +128,17 @@ LOGS_TABLE = "etl_servicetitan"
 def get_logs_project():
     """Obtiene el proyecto para logging dinámicamente"""
     # Usar el mismo proyecto que se está usando para las operaciones
-    return get_bigquery_project_id()
+    project = get_bigquery_project_id()
+    
+    # Mostrar mensaje informativo sobre el proyecto detectado (solo una vez)
+    if not hasattr(get_logs_project, '_project_shown'):
+        detected_from = "variable de entorno"
+        if not os.environ.get('GCP_PROJECT') and not os.environ.get('GOOGLE_CLOUD_PROJECT'):
+            detected_from = "gcloud config o credenciales"
+        print(f"🔍 Proyecto detectado para logs: {project} (desde {detected_from})")
+        get_logs_project._project_shown = True
+    
+    return project
 
 # Configuración para tabla de metadata (SIEMPRE centralizada en pph-central)
 METADATA_PROJECT = "pph-central"
@@ -211,6 +278,13 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
     try:
         # Obtener proyecto de logs dinámicamente para usar el proyecto correcto
         logs_project = get_logs_project()
+        
+        # Debug: mostrar qué proyecto se está usando para logs
+        if os.environ.get('DEBUG_LOGS', '').lower() == 'true':
+            print(f"🔍 DEBUG: Usando proyecto para logs: {logs_project}")
+            print(f"🔍 DEBUG: GCP_PROJECT={os.environ.get('GCP_PROJECT')}")
+            print(f"🔍 DEBUG: GOOGLE_CLOUD_PROJECT={os.environ.get('GOOGLE_CLOUD_PROJECT')}")
+        
         client = bigquery.Client(project=logs_project)
         table_id = f"{LOGS_DATASET}.{LOGS_TABLE}"
         
