@@ -906,23 +906,23 @@ def process_company(row):
                         load_time = time.time() - load_start
                         # print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza) en {load_time:.1f}s")
                     except Exception as retry_error:
-                    log_event_bq(
-                        company_id=company_id,
-                        company_name=company_name,
-                        project_id=project_id,
-                        endpoint=endpoint_name,
-                        event_type="ERROR",
-                        event_title="Error cargando a staging (después de limpieza)",
-                        event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
-                    )
-                    print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
-                    # Paso 4: MERGE no ejecutado (error cargando a staging)
-                    merge_time = 0.0  # No hubo intento de MERGE
-                    print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging después de limpieza - {str(retry_error)}")
-                    # Paso 5: Endpoint completado con errores
-                    endpoint_time = time.time() - endpoint_start_time
-                    print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
-                    continue
+                        log_event_bq(
+                            company_id=company_id,
+                            company_name=company_name,
+                            project_id=project_id,
+                            endpoint=endpoint_name,
+                            event_type="ERROR",
+                            event_title="Error cargando a staging (después de limpieza)",
+                            event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
+                        )
+                        print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
+                        # Paso 4: MERGE no ejecutado (error cargando a staging)
+                        merge_time = 0.0  # No hubo intento de MERGE
+                        print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging después de limpieza - {str(retry_error)}")
+                        # Paso 5: Endpoint completado con errores
+                        endpoint_time = time.time() - endpoint_start_time
+                        print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+                        continue
             else:
                 log_event_bq(
                     company_id=company_id,
