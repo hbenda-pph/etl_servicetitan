@@ -2,9 +2,16 @@ import os
 import json
 import re
 import time
+import logging
 from datetime import datetime, timezone
 from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
+
+# Configurar logging para suprimir mensajes innecesarios
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("google.auth").setLevel(logging.WARNING)
+logging.getLogger("google.auth.transport").setLevel(logging.WARNING)
 
 # Configuración de BigQuery
 # Detectar proyecto automáticamente desde variable de entorno o metadata del service account
@@ -285,7 +292,19 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
     IMPORTANTE: Campos de nivel superior → snake_case, campos dentro de STRUCT → camelCase (preservar fuente).
     Soporta tanto JSON array como newline-delimited JSON.
     Si se proporciona repeated_fields, convierte NULL a [] para esos campos.
-    También corrige campos anidados que deberían ser arrays pero vienen como objetos."""
+    También corrige campos anidados que deberían ser arrays pero vienen como objetos.
+    
+    Para archivos grandes (>100MB), usa procesamiento streaming para evitar problemas de memoria."""
+    
+    # Detectar tamaño del archivo
+    file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
+    LARGE_FILE_THRESHOLD_MB = 100  # Usar streaming para archivos >100MB
+    
+    if file_size_mb > LARGE_FILE_THRESHOLD_MB:
+        # Usar procesamiento streaming para archivos grandes
+        return fix_json_format_streaming(local_path, temp_path, repeated_fields)
+    
+    # Procesamiento en memoria para archivos pequeños (más rápido)
     with open(local_path, 'r', encoding='utf-8') as f:
         first_char = f.read(1)
         f.seek(0)
@@ -335,6 +354,201 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
                 else:
                     new_item[snake_key] = fixed_value
             f.write(json.dumps(new_item) + '\n')
+
+def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
+    """Versión streaming de fix_json_format para archivos grandes.
+    Procesa el archivo línea por línea o item por item sin cargar todo en memoria."""
+    
+    # Detectar campos array primero (usando una muestra pequeña)
+    array_fields = set()
+    if repeated_fields:
+        array_fields = set(repeated_fields)
+    
+    # Leer una muestra para detectar campos array (solo primeras líneas/chars)
+    sample_items = []
+    sample_size = 1024 * 1024  # Leer primeros 1MB para muestra
+    with open(local_path, 'r', encoding='utf-8') as f:
+        first_char = f.read(1)
+        f.seek(0)
+        
+        if first_char == '[':
+            # JSON array tradicional - leer solo una muestra pequeña
+            sample_content = f.read(sample_size)
+            # Buscar items JSON en la muestra
+            bracket_pos = sample_content.find('[')
+            if bracket_pos != -1:
+                depth = 0
+                item_start = None
+                in_string = False
+                escape_next = False
+                
+                for i, char in enumerate(sample_content[bracket_pos+1:], start=bracket_pos+1):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    
+                    if char == '\\':
+                        escape_next = True
+                        continue
+                    
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    
+                    if in_string:
+                        continue
+                    
+                    if char == '[':
+                        depth += 1
+                    elif char == ']':
+                        if depth == 0:
+                            break
+                        depth -= 1
+                    elif char == '{' and depth == 0:
+                        item_start = i
+                    elif char == '}' and depth == 0 and item_start is not None:
+                        try:
+                            item_str = sample_content[item_start:i+1].strip()
+                            if item_str and len(sample_items) < 100:
+                                sample_items.append(json.loads(item_str))
+                        except:
+                            pass
+                        item_start = None
+        else:
+            # Newline-delimited JSON - leer primeras 100 líneas
+            for i, line in enumerate(f):
+                if i >= 100:
+                    break
+                if line.strip():
+                    try:
+                        sample_items.append(json.loads(line))
+                    except:
+                        pass
+    
+    # Detectar campos array de la muestra
+    detected_array_fields = set()
+    for item in sample_items:
+        for key, value in item.items():
+            if isinstance(value, list):
+                detected_array_fields.add(to_snake_case(key))
+    array_fields = array_fields | detected_array_fields
+    
+    # Procesar archivo completo de forma streaming
+    with open(local_path, 'r', encoding='utf-8') as f_in, open(temp_path, 'w', encoding='utf-8') as f_out:
+        first_char = f_in.read(1)
+        f_in.seek(0)
+        
+        if first_char == '[':
+            # JSON array tradicional - procesar item por item usando parser streaming
+            # Leer en chunks y parsear objetos JSON completos
+            chunk_size = 64 * 1024  # 64KB chunks
+            buffer = ""
+            depth = 0
+            item_start = None
+            in_string = False
+            escape_next = False
+            found_start = False
+            
+            while True:
+                chunk = f_in.read(chunk_size)
+                if not chunk:
+                    break
+                
+                buffer += chunk
+                
+                i = 0
+                while i < len(buffer):
+                    char = buffer[i]
+                    
+                    if escape_next:
+                        escape_next = False
+                        i += 1
+                        continue
+                    
+                    if char == '\\':
+                        escape_next = True
+                        i += 1
+                        continue
+                    
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        i += 1
+                        continue
+                    
+                    if in_string:
+                        i += 1
+                        continue
+                    
+                    if not found_start and char == '[':
+                        found_start = True
+                        i += 1
+                        continue
+                    
+                    if not found_start:
+                        i += 1
+                        continue
+                    
+                    if char == '[':
+                        depth += 1
+                    elif char == ']':
+                        if depth == 0:
+                            # Fin del array - procesar último item si existe
+                            if item_start is not None:
+                                try:
+                                    item_str = buffer[item_start:i].strip().rstrip(',').strip()
+                                    if item_str:
+                                        item = json.loads(item_str)
+                                        new_item = transform_item(item, array_fields)
+                                        f_out.write(json.dumps(new_item) + '\n')
+                                except:
+                                    pass
+                            buffer = buffer[i+1:]
+                            break
+                        depth -= 1
+                    elif char == '{' and depth == 0:
+                        item_start = i
+                    elif char == '}' and depth == 0 and item_start is not None:
+                        try:
+                            item_str = buffer[item_start:i+1].strip()
+                            if item_str:
+                                item = json.loads(item_str)
+                                new_item = transform_item(item, array_fields)
+                                f_out.write(json.dumps(new_item) + '\n')
+                        except:
+                            pass
+                        item_start = None
+                        # Limpiar buffer hasta este punto para ahorrar memoria
+                        buffer = buffer[i+1:]
+                        i = -1  # Resetear índice después de limpiar
+                    
+                    i += 1
+        else:
+            # Newline-delimited JSON - procesar línea por línea (más eficiente)
+            for line in f_in:
+                if line.strip():
+                    try:
+                        item = json.loads(line)
+                        new_item = transform_item(item, array_fields)
+                        f_out.write(json.dumps(new_item) + '\n')
+                    except Exception as e:
+                        # Continuar con la siguiente línea si hay error
+                        pass
+
+def transform_item(item, array_fields):
+    """Transforma un item individual a snake_case en nivel superior, preserva camelCase en STRUCT."""
+    new_item = {}
+    for k, v in item.items():
+        snake_key = to_snake_case(k)  # snake_case para campos de nivel superior
+        
+        # Procesar recursivamente: preserva camelCase dentro de STRUCT
+        fixed_value = fix_nested_value(v, snake_key, array_fields)
+        
+        # Si el campo es un array y viene como NULL, convertir a array vacío
+        if snake_key in array_fields and fixed_value is None:
+            new_item[snake_key] = []
+        else:
+            new_item[snake_key] = fixed_value
+    return new_item
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
     storage_client = storage.Client(project=project_id)
