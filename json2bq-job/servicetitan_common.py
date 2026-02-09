@@ -150,16 +150,23 @@ def load_endpoints_from_metadata():
     Carga los endpoints automáticamente desde metadata_consolidated_tables.
     Solo carga endpoints con silver_use_bronze = TRUE (endpoints que este ETL maneja,
     diferenciándolos de los que maneja Fivetran).
+    
+    Returns:
+        Lista de tuplas [(endpoint_name, table_name), ...]
     """
     try:
         client = bigquery.Client(project=METADATA_PROJECT)
         query = f'''
-            SELECT DISTINCT endpoint_name, table_name
+            SELECT DISTINCT 
+                endpoint.name AS endpoint_name,
+                table_name
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE silver_use_bronze = TRUE
-            AND endpoint_name IS NOT NULL
-            AND table_name IS NOT NULL
-            ORDER BY endpoint_name
+            WHERE endpoint IS NOT NULL
+              AND endpoint.name IS NOT NULL
+              AND table_name IS NOT NULL
+              AND active = TRUE
+              AND silver_use_bronze = TRUE
+            ORDER BY endpoint.name
         '''
         results = client.query(query).result()
         endpoints = [(row.endpoint_name, row.table_name) for row in results]
