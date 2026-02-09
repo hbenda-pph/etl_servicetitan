@@ -18,7 +18,8 @@ from servicetitan_common import (
     _schema_field_to_sql,
     to_snake_case,
     load_json_to_staging_with_error_handling,
-    validate_json_file
+    validate_json_file,
+    align_schemas_before_merge
 )
 
 PROJECT_SOURCE = get_project_source()
@@ -341,6 +342,41 @@ def process_company(row):
                 # Si hay un error crítico al actualizar el esquema, loguear y continuar
                 print(f"⚠️  Error al actualizar esquema: {str(schema_error)}")
                 print(f"⚠️  Continuando con el MERGE. Si falla, se manejará en el bloque de errores del MERGE.")
+        
+        # CRÍTICO: Verificar y corregir incompatibilidades de esquema ANTES del MERGE
+        # Esto evita errores de tipo de dato durante el MERGE
+        print(f"🔍 Verificando compatibilidad de esquemas entre staging y final...")
+        needs_correction, corrections_made, alignment_error = align_schemas_before_merge(
+            bq_client=bq_client,
+            staging_table=staging_table,
+            final_table=final_table,
+            project_id=project_id,
+            dataset_final=dataset_final,
+            table_final=table_final
+        )
+        
+        if alignment_error:
+            merge_success = False
+            merge_error_msg = f"Error alineando esquemas antes del MERGE: {alignment_error}"
+            merge_time = time.time() - merge_start
+            print(f"❌ MERGE con Soft Delete no ejecutado para {dataset_final}.{table_final} después de {merge_time:.1f}s: {merge_error_msg}")
+            log_event_bq_all(
+                company_id=company_id,
+                company_name=company_name,
+                project_id=project_id,
+                endpoint=endpoint_name,
+                event_type="ERROR",
+                event_title="Error alineando esquemas",
+                event_message=merge_error_msg
+            )
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            continue  # Continuar al siguiente endpoint
+        
+        if needs_correction:
+            # Refrescar tabla final después de correcciones
+            final_table = bq_client.get_table(table_ref_final)
+            final_schema = final_table.schema
         
         # Asegurar que campos ETL existan antes de construir MERGE SQL
         final_table_refresh = bq_client.get_table(table_ref_final)
