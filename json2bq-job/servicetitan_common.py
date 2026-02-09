@@ -855,6 +855,7 @@ def load_json_to_staging_with_error_handling(
         )
     
     # Intentar cargar directamente
+    load_job = None
     try:
         load_job = bq_client.load_table_from_file(
             open(temp_fixed, "rb"),
@@ -869,6 +870,49 @@ def load_json_to_staging_with_error_handling(
         problematic_field = None
         needs_fix = False
         fix_type = None  # 'repeated', 'nested', 'type_mismatch'
+        
+        # Intentar obtener errores detallados del job de BigQuery
+        # El mensaje de excepción puede ser genérico, pero el job tiene errores detallados
+        detailed_errors = []
+        if load_job:
+            try:
+                # Esperar a que el job termine (si no ha terminado)
+                try:
+                    load_job.result()
+                except:
+                    pass
+                
+                # Obtener errores del job
+                if hasattr(load_job, 'errors') and load_job.errors:
+                    detailed_errors = load_job.errors
+                elif hasattr(load_job, 'job_id'):
+                    # Obtener el job completo para acceder a los errores
+                    try:
+                        job = bq_client.get_job(load_job.job_id)
+                        if hasattr(job, 'errors') and job.errors:
+                            detailed_errors = job.errors
+                    except:
+                        pass
+            except:
+                pass
+        
+        # Construir mensaje de error más detallado
+        if detailed_errors:
+            error_details = []
+            for err in detailed_errors:
+                err_msg = err.get('message', '') if isinstance(err, dict) else str(err)
+                error_details.append(err_msg)
+                # Extraer campo del mensaje detallado si está disponible
+                if 'Field:' in err_msg and not problematic_field:
+                    field_match = re.search(r'Field:\s*([\w_]+)', err_msg, re.IGNORECASE)
+                    if field_match:
+                        problematic_field = field_match.group(1)
+            
+            # Agregar detalles al mensaje de error y mostrarlo
+            if error_details:
+                detailed_msg = "\n".join([f"  • {detail}" for detail in error_details[:5]])
+                print(f"❌ Error detallado de BigQuery:\n{detailed_msg}")
+                error_msg = f"{error_msg}\n\n📋 Detalles del error:\n{detailed_msg}"
         
         # Intentar extraer campo REPEATED del mensaje de error
         # Formato 1: "Field: permissions; Value: NULL"
