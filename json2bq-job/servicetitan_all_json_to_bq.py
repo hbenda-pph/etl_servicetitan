@@ -17,6 +17,7 @@ from servicetitan_common import (
     transform_item,
     _schema_field_to_sql,
     to_snake_case,
+    load_json_to_staging_with_error_handling,
     LOGS_PROJECT,
     LOGS_DATASET,
     LOGS_TABLE
@@ -203,259 +204,35 @@ def process_company(row):
         except Exception:
             pass  # Continuar si hay error al borrar
         
-        # Obtener esquema autodetectado de una muestra para usar en la carga
-        # Los errores de tipo de dato se detectarán y corregirán automáticamente cuando ocurran
-        schema = None
-        try:
-            # Leer primeras líneas para obtener esquema
-            sample_file = f"/tmp/sample_schema_{project_id}_{table_name}.json"
-            with open(temp_fixed, 'r', encoding='utf-8') as f_in:
-                with open(sample_file, 'w', encoding='utf-8') as f_out:
-                    # Leer primeras 100 líneas para obtener esquema
-                    for i, line in enumerate(f_in):
-                        if i >= 100:
-                            break
-                        f_out.write(line)
-            
-            # Cargar muestra para obtener esquema autodetectado
-            sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_schema_sample")
-            sample_config = bigquery.LoadJobConfig(
-                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                autodetect=True,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-            )
-            
-            try:
-                sample_load_job = bq_client.load_table_from_file(
-                    open(sample_file, "rb"),
-                    sample_table_ref,
-                    job_config=sample_config
-                )
-                sample_load_job.result()
-                sample_table = bq_client.get_table(sample_table_ref)
-                schema = sample_table.schema
-                bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                if os.path.exists(sample_file):
-                    os.remove(sample_file)
-                
-                # Usar esquema autodetectado sin correcciones proactivas
-                # Los errores de tipo se detectarán y corregirán automáticamente cuando ocurran
-            except Exception as sample_error:
-                # Si falla la muestra, continuar con autodetect normal
-                schema = None
-                bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                if os.path.exists(sample_file):
-                    os.remove(sample_file)
-        except Exception as schema_error:
-            # Si hay error obteniendo esquema, continuar con autodetect normal
-            schema = None
+        # Usar función común para cargar con manejo automático de errores
+        success, load_time, error_msg = load_json_to_staging_with_error_handling(
+            bq_client=bq_client,
+            temp_fixed=temp_fixed,
+            temp_json=temp_json,
+            table_ref_staging=table_ref_staging,
+            project_id=project_id,
+            table_name=table_name,
+            table_staging=table_staging,
+            dataset_staging=dataset_staging,
+            load_start=load_start,
+            log_event_callback=log_event_bq_all,
+            company_id=company_id,
+            company_name=company_name,
+            endpoint_name=endpoint_name
+        )
         
-        # Configurar job_config con esquema corregido o autodetect
-        if schema:
-            job_config = bigquery.LoadJobConfig(
-                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                schema=schema,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-            )
-        else:
-            job_config = bigquery.LoadJobConfig(
-                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                autodetect=True,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-            )
+        if not success:
+            print(f"❌ Error cargando a tabla staging: {error_msg}")
+            # Paso 4: MERGE no ejecutado (error cargando a staging)
+            merge_time = 0.0  # No hubo intento de MERGE
+            print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
+            # Paso 5: Endpoint completado con errores
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            continue
         
-        # Intentar cargar directamente
-        try:
-            load_job = bq_client.load_table_from_file(
-                open(temp_fixed, "rb"),
-                table_ref_staging,
-                job_config=job_config
-            )
-            load_job.result()
-            load_time = time.time() - load_start
-            # print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} en {load_time:.1f}s")
-        except Exception as e:
-            error_msg = str(e)
-            problematic_field = None
-            needs_fix = False
-            fix_type = None  # 'repeated', 'nested', 'type_mismatch'
-            
-            # Intentar extraer campo REPEATED del mensaje de error
-            # Formato 1: "Field: permissions; Value: NULL" (puede estar en cualquier parte del mensaje)
-            # Formato 1b: "Only optional fields can be set to NULL. Field: permissions; Value: NULL"
-            match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
-            
-            # Formato 2: "JSON object specified for non-record field: items.serialNumbers"
-            # Este error indica que un campo que debería ser array viene como objeto
-            match2 = re.search(r'non-record field:\s*([\w.]+)', error_msg, re.IGNORECASE)
-            
-            # Formato 3: Error de tipo de dato - "Could not convert value 'string_value: "21061-3557"' to integer. Field: location_zip"
-            # Este error indica que BigQuery infirió un tipo incorrecto (ej: INTEGER cuando debería ser STRING)
-            match3 = re.search(r'Could not convert.*?Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
-            
-            if match:
-                problematic_field = match.group(1)
-                needs_fix = True
-                fix_type = 'repeated'
-                print(f"🔍 Campo REPEATED detectado del error: {problematic_field}")
-                print(f"🧹 Limpiando datos: convirtiendo NULL a [] para campo {problematic_field}")
-            elif match2:
-                problematic_field = match2.group(1)
-                needs_fix = True
-                fix_type = 'nested'
-                print(f"🔍 Campo anidado con tipo incorrecto detectado: {problematic_field}")
-                print(f"🧹 Limpiando datos: corrigiendo campo {problematic_field} que viene como objeto pero debería ser array")
-            elif match3:
-                problematic_field = match3.group(1)
-                needs_fix = True
-                fix_type = 'type_mismatch'
-                print(f"🔍 Error de tipo de dato detectado: {problematic_field}")
-                print(f"🔧 Corrigiendo esquema: convirtiendo campo {problematic_field} a STRING")
-            
-            if needs_fix and problematic_field:
-                if fix_type == 'type_mismatch':
-                    # Error de tipo de dato: necesitamos corregir el esquema
-                    # Estrategia: obtener esquema de una muestra pequeña, corregir el campo problemático a STRING, y cargar completo
-                    try:
-                        print(f"🔧 Intentando corregir esquema para campo {problematic_field}...")
-                        
-                        # Paso 1: Obtener esquema de una muestra pequeña (evita cargar archivo completo que fallará)
-                        sample_file = f"/tmp/sample_{project_id}_{table_name}.json"
-                        with open(temp_fixed, 'r', encoding='utf-8') as f_in:
-                            with open(sample_file, 'w', encoding='utf-8') as f_out:
-                                # Leer primeras 100 líneas para obtener esquema
-                                for i, line in enumerate(f_in):
-                                    if i >= 100:
-                                        break
-                                    f_out.write(line)
-                        
-                        # Cargar muestra para obtener esquema autodetectado
-                        sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample")
-                        sample_config = bigquery.LoadJobConfig(
-                            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                            autodetect=True,
-                            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-                        )
-                        
-                        try:
-                            sample_load_job = bq_client.load_table_from_file(
-                                open(sample_file, "rb"),
-                                sample_table_ref,
-                                job_config=sample_config
-                            )
-                            sample_load_job.result()
-                            sample_table = bq_client.get_table(sample_table_ref)
-                            schema = sample_table.schema
-                            bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                            if os.path.exists(sample_file):
-                                os.remove(sample_file)
-                        except Exception as sample_error:
-                            schema = None
-                            bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                            if os.path.exists(sample_file):
-                                os.remove(sample_file)
-                            raise ValueError(f"No se pudo obtener esquema de muestra: {str(sample_error)}")
-                        
-                        # Paso 2: Corregir el campo problemático a STRING en el esquema
-                        if schema:
-                            corrected_schema = []
-                            field_found = False
-                            for field in schema:
-                                if field.name == problematic_field:
-                                    # Cambiar tipo a STRING independientemente del tipo inferido
-                                    corrected_field = bigquery.SchemaField(
-                                        field.name,
-                                        'STRING',
-                                        mode=field.mode,
-                                        fields=field.fields,
-                                        description=field.description
-                                    )
-                                    corrected_schema.append(corrected_field)
-                                    field_found = True
-                                    print(f"✅ Campo {problematic_field} convertido de {field.field_type} a STRING en esquema")
-                                else:
-                                    corrected_schema.append(field)
-                            
-                            if not field_found:
-                                raise ValueError(f"Campo {problematic_field} no encontrado en esquema autodetectado")
-                            
-                            # Paso 3: Borrar tabla staging si existe y cargar archivo completo con esquema corregido
-                            bq_client.delete_table(table_ref_staging, not_found_ok=True)
-                            
-                            fixed_job_config = bigquery.LoadJobConfig(
-                                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                                schema=corrected_schema,
-                                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-                            )
-                            
-                            load_job = bq_client.load_table_from_file(
-                                open(temp_fixed, "rb"),
-                                table_ref_staging,
-                                job_config=fixed_job_config
-                            )
-                            load_job.result()
-                            load_time = time.time() - load_start
-                            print(f"✅ Cargado a tabla staging con esquema corregido en {load_time:.1f}s")
-                        else:
-                            raise ValueError("No se pudo obtener esquema para corrección automática")
-                    except Exception as schema_error:
-                        print(f"❌ Error corrigiendo esquema: {str(schema_error)}")
-                        raise schema_error
-                else:
-                    # Limpiar datos con el campo detectado (método original para REPEATED y nested)
-                    # Si es un campo anidado (ej: items.serialNumbers), extraer solo el nombre del campo
-                    field_name = problematic_field.split('.')[-1] if '.' in problematic_field else problematic_field
-                    # Usar nombre original (puede ser camelCase o snake_case dependiendo de la fuente)
-                    print(f"🔧 Campo a limpiar: {field_name}")
-                    fix_json_format(temp_json, temp_fixed, repeated_fields={field_name})
-                
-                # Reintentar carga (solo si no se hizo ya en el bloque type_mismatch)
-                if fix_type != 'type_mismatch':
-                    try:
-                        load_job = bq_client.load_table_from_file(
-                            open(temp_fixed, "rb"),
-                            table_ref_staging,
-                            job_config=job_config
-                        )
-                        load_job.result()
-                        load_time = time.time() - load_start
-                        # print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza) en {load_time:.1f}s")
-                    except Exception as retry_error:
-                        log_event_bq_all(
-                            company_id=company_id,
-                            company_name=company_name,
-                            project_id=project_id,
-                            endpoint=endpoint_name,
-                            event_type="ERROR",
-                            event_title="Error cargando a staging (después de limpieza)",
-                            event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
-                        )
-                        print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
-                        # Paso 4: MERGE no ejecutado (error cargando a staging)
-                        merge_time = 0.0  # No hubo intento de MERGE
-                        print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging después de limpieza - {str(retry_error)}")
-                        # Paso 5: Endpoint completado con errores
-                        endpoint_time = time.time() - endpoint_start_time
-                        print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
-                        continue
-            else:
-                log_event_bq_all(
-                    company_id=company_id,
-                    company_name=company_name,
-                    project_id=project_id,
-                    endpoint=endpoint_name,
-                    event_type="ERROR",
-                    event_title="Error cargando a staging",
-                    event_message=f"Error cargando a tabla staging: {error_msg}"
-                )
-                print(f"❌ Error cargando a tabla staging: {error_msg}")
-                # Paso 4: MERGE no ejecutado (error cargando a staging)
-                merge_time = 0.0  # No hubo intento de MERGE
-                print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
-                # Paso 5: Endpoint completado con errores
-                endpoint_time = time.time() - endpoint_start_time
-                print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
-                continue
+        # Carga exitosa, continuar con el proceso
+        # (load_time ya está calculado por la función común)
         
         # Asegurar que la tabla final existe
         try:

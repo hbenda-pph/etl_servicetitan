@@ -10,6 +10,7 @@ Uso:
 
 import argparse
 import os
+import re
 import time
 from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
@@ -22,6 +23,7 @@ from servicetitan_common import (
     log_event_bq,
     fix_json_format,
     _schema_field_to_sql,
+    load_json_to_staging_with_error_handling,
     LOGS_PROJECT,
     LOGS_DATASET,
     LOGS_TABLE
@@ -178,35 +180,34 @@ def process_company(row, endpoints_filter=None, dry_run=False):
         except Exception:
             pass
         
-        # Cargar con autodetect
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            autodetect=True,
-            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+        # Usar función común para cargar con manejo automático de errores
+        def log_callback(**kwargs):
+            """Wrapper para log_event_bq con source correcto"""
+            kwargs.setdefault('source', 'servicetitan_json_to_bq')
+            log_event_bq(**kwargs)
+        
+        success, load_time, error_msg = load_json_to_staging_with_error_handling(
+            bq_client=bq_client,
+            temp_fixed=temp_fixed,
+            temp_json=temp_json,
+            table_ref_staging=table_ref_staging,
+            project_id=project_id,
+            table_name=table_name,
+            table_staging=table_staging,
+            dataset_staging=dataset_staging,
+            load_start=load_start,
+            log_event_callback=log_callback,
+            company_id=company_id,
+            company_name=company_name,
+            endpoint_name=endpoint_name
         )
         
-        try:
-            load_job = bq_client.load_table_from_file(
-                open(temp_fixed, "rb"),
-                table_ref_staging,
-                job_config=job_config
-            )
-            load_job.result()
-            load_time = time.time() - load_start
-            print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} en {load_time:.1f}s")
-        except Exception as e:
-            print(f"❌ Error cargando a staging: {str(e)}")
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="ERROR",
-                event_title="Error cargando a staging",
-                event_message=f"Error cargando a tabla staging: {str(e)}",
-                source="servicetitan_json_to_bq"
-            )
+        if not success:
+            print(f"❌ Error cargando a staging: {error_msg}")
             continue
+        
+        if load_time:
+            print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} en {load_time:.1f}s")
         
         # Asegurar que la tabla final existe
         try:
