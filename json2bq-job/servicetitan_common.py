@@ -64,14 +64,14 @@ def get_bigquery_project_id():
     # Para otros ambientes, project_name = project_id
     return project_source
 
-# Configuración para logging centralizado (usar project_id real)
-def get_logs_project():
-    """Obtiene el proyecto para logging"""
-    return get_bigquery_project_id()
-
-LOGS_PROJECT = get_logs_project()
+# Configuración para logging centralizado
 LOGS_DATASET = "logs"
 LOGS_TABLE = "etl_servicetitan"
+
+def get_logs_project():
+    """Obtiene el proyecto para logging dinámicamente"""
+    # Usar el mismo proyecto que se está usando para las operaciones
+    return get_bigquery_project_id()
 
 # Configuración para tabla de metadata (SIEMPRE centralizada en pph-central)
 METADATA_PROJECT = "pph-central"
@@ -209,7 +209,9 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
                 event_type="INFO", event_title="", event_message="", info=None, source="servicetitan_json_to_bigquery"):
     """Inserta un evento en la tabla de logs centralizada."""
     try:
-        client = bigquery.Client(project=LOGS_PROJECT)
+        # Obtener proyecto de logs dinámicamente para usar el proyecto correcto
+        logs_project = get_logs_project()
+        client = bigquery.Client(project=logs_project)
         table_id = f"{LOGS_DATASET}.{LOGS_TABLE}"
         
         row = {
@@ -584,6 +586,75 @@ def transform_item(item, array_fields):
             new_item[snake_key] = fixed_value
     return new_item
 
+def validate_json_file(file_path, max_lines_to_check=1000):
+    """
+    Valida rápidamente que un archivo JSON esté bien formado.
+    Para archivos grandes, solo valida las primeras líneas.
+    
+    Args:
+        file_path: Ruta al archivo JSON
+        max_lines_to_check: Número máximo de líneas a validar (para archivos grandes)
+    
+    Returns:
+        tuple: (is_valid: bool, error_message: str or None, json_type: 'array' or 'ndjson' or None)
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            first_char = f.read(1)
+            f.seek(0)
+            
+            if first_char == '[':
+                # JSON array tradicional - validar que sea JSON válido
+                try:
+                    # Para archivos grandes, solo leer una muestra
+                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                    if file_size_mb > 100:
+                        # Archivo grande: validar solo estructura básica (primeros y últimos caracteres)
+                        f.seek(0, 2)  # Ir al final
+                        file_size = f.tell()
+                        f.seek(0)
+                        # Leer primeros 1KB y últimos 1KB
+                        first_chunk = f.read(1024)
+                        if file_size > 2048:
+                            f.seek(file_size - 1024)
+                            last_chunk = f.read(1024)
+                            # Validar que empiece con [ y termine con ]
+                            if not first_chunk.strip().startswith('['):
+                                return (False, "Archivo JSON array no comienza con '['", None)
+                            if not last_chunk.strip().endswith(']'):
+                                return (False, "Archivo JSON array no termina con ']'", None)
+                        else:
+                            # Archivo pequeño: validar completo
+                            f.seek(0)
+                            json.load(f)
+                    else:
+                        # Archivo pequeño: validar completo
+                        json.load(f)
+                    return (True, None, 'array')
+                except json.JSONDecodeError as e:
+                    return (False, f"JSON array mal formado: {str(e)}", None)
+            else:
+                # Newline-delimited JSON - validar primeras líneas
+                lines_checked = 0
+                for line_num, line in enumerate(f, 1):
+                    if line.strip():
+                        try:
+                            json.loads(line)
+                            lines_checked += 1
+                            if lines_checked >= max_lines_to_check:
+                                break  # Ya validamos suficientes líneas
+                        except json.JSONDecodeError as e:
+                            return (False, f"Línea {line_num} mal formada (NDJSON): {str(e)}", None)
+                
+                if lines_checked == 0:
+                    return (False, "Archivo JSON vacío o sin líneas válidas", None)
+                
+                return (True, None, 'ndjson')
+    except UnicodeDecodeError as e:
+        return (False, f"Error de encoding UTF-8: {str(e)}", None)
+    except Exception as e:
+        return (False, f"Error validando archivo JSON: {str(e)}", None)
+
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
@@ -716,13 +787,32 @@ def load_json_to_staging_with_error_handling(
         fix_type = None  # 'repeated', 'nested', 'type_mismatch'
         
         # Intentar extraer campo REPEATED del mensaje de error
+        # Formato 1: "Field: permissions; Value: NULL"
         match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
         
         # Formato 2: "JSON object specified for non-record field: items.serialNumbers"
         match2 = re.search(r'non-record field:\s*([\w.]+)', error_msg, re.IGNORECASE)
         
-        # Formato 3: Error de tipo de dato
-        match3 = re.search(r'Could not convert.*?Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
+        # Formato 3: Error de tipo de dato - puede estar en múltiples niveles del mensaje
+        # "Could not convert value 'string_value: "S72-85922420"' to integer. Field: job_number"
+        # También puede estar en: "JSON parsing error... Could not convert... Field: job_number"
+        match3 = re.search(r'Could not convert.*?Field:\s*([\w_]+)', error_msg, re.IGNORECASE | re.DOTALL)
+        
+        # Formato 4: "JSON table encountered too many errors" - buscar en los detalles anidados
+        # El error real puede estar en los detalles del error, buscar cualquier "Field: X"
+        # El mensaje puede tener múltiples niveles: "JSON table encountered too many errors... JSON parsing error... Field: job_number"
+        if ('JSON table encountered too many errors' in error_msg or 'JSON parsing error' in error_msg) and not match3:
+            # Buscar el campo problemático en el mensaje completo (puede estar en cualquier parte)
+            # Buscar todos los campos mencionados y usar el último (más probable que sea el problemático)
+            all_fields = re.findall(r'Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
+            if all_fields:
+                # Usar el último campo encontrado (generalmente el más específico)
+                problematic_field = all_fields[-1]
+                needs_fix = True
+                fix_type = 'type_mismatch'
+                print(f"🔍 Error de tipo de dato detectado (desde errores anidados): {problematic_field}")
+                print(f"🔧 Corrigiendo esquema: convirtiendo campo {problematic_field} a STRING")
+                match3 = type('Match', (), {'group': lambda self, n: problematic_field})()  # Crear objeto match simulado
         
         if match:
             problematic_field = match.group(1)

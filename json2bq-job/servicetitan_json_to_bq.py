@@ -24,9 +24,7 @@ from servicetitan_common import (
     fix_json_format,
     _schema_field_to_sql,
     load_json_to_staging_with_error_handling,
-    LOGS_PROJECT,
-    LOGS_DATASET,
-    LOGS_TABLE
+    validate_json_file
 )
 
 # Configuración
@@ -117,6 +115,25 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             download_time = time.time() - download_start
             file_size_mb = os.path.getsize(temp_json) / (1024 * 1024)
             print(f"⬇️  Descargado {json_filename} ({file_size_mb:.2f} MB) en {download_time:.1f}s")
+            
+            # Validar JSON inmediatamente después de descargar
+            print(f"🔍 Validando estructura JSON...")
+            is_valid, validation_error, json_type = validate_json_file(temp_json)
+            if not is_valid:
+                print(f"❌ ARCHIVO JSON MAL FORMADO: {validation_error}")
+                print(f"❌ El archivo {json_filename} está corrupto o mal generado por el job anterior (st2json)")
+                log_event_bq(
+                    company_id=company_id,
+                    company_name=company_name,
+                    project_id=project_id,
+                    endpoint=endpoint_name,
+                    event_type="ERROR",
+                    event_title="Archivo JSON mal formado",
+                    event_message=f"Archivo {json_filename} está mal formado: {validation_error}. Revisar job st2json.",
+                    source="servicetitan_json_to_bq"
+                )
+                continue
+            print(f"✅ JSON válido (tipo: {json_type})")
         except Exception as e:
             print(f"❌ Error descargando {json_filename}: {str(e)}")
             log_event_bq(
