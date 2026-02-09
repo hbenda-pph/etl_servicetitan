@@ -673,6 +673,14 @@ def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, tab
         print(f"⚠️  Error detectando cambios: {str(e)}")
         return 'UPDATE'  # Por defecto, asumir UPDATE    
 
+def cleanup_staging_table(bq_client, table_ref):
+    """Helper function para borrar tabla staging. Siempre se ejecuta silenciosamente."""
+    if bq_client and table_ref:
+        try:
+            bq_client.delete_table(table_ref, not_found_ok=True)
+        except Exception:
+            pass  # Silenciosamente ignorar errores
+
 def process_company(row):
     company_id = row.company_id
     company_name = row.company_name
@@ -691,6 +699,10 @@ def process_company(row):
         json_filename = f"servicetitan_{table_name}.json"
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
+        
+        # Referencias para limpieza de staging
+        table_ref_staging_cleanup = None
+        bq_client_cleanup = None
         
         print(f"\n📦 Endpoint: {endpoint_name} (tabla: {table_name})")
         
@@ -715,6 +727,8 @@ def process_company(row):
                 # Paso 5: Endpoint completado con errores
                 endpoint_time = time.time() - endpoint_start_time
                 print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+                # Borrar staging antes de continuar (no se usa para monitoreo)
+                cleanup_staging_table(bq_client_cleanup, table_ref_staging_cleanup)
                 continue
             blob.download_to_filename(temp_json)
             download_time = time.time() - download_start
@@ -787,6 +801,12 @@ def process_company(row):
             dataset.location = "US"
             bq_client.create_dataset(dataset)
             print(f"🆕 Dataset {dataset_staging} creado en proyecto {project_id}")
+        
+        # Limpiar staging al inicio para evitar conflictos de esquemas de ejecuciones anteriores
+        try:
+            bq_client.delete_table(table_ref_staging, not_found_ok=True)
+        except Exception:
+            pass  # Continuar si hay error al borrar
         
         # Obtener esquema autodetectado de una muestra y corregir campos conocidos que deben ser STRING
         # Esto evita errores de tipo de dato desde el inicio
@@ -1067,6 +1087,8 @@ def process_company(row):
                 # Paso 5: Endpoint completado con errores
                 endpoint_time = time.time() - endpoint_start_time
                 print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+                # Borrar staging antes de continuar (no se usa para monitoreo)
+                cleanup_staging_table(bq_client_cleanup, table_ref_staging_cleanup)
                 continue
         
         # Asegurar que la tabla final existe
@@ -1155,6 +1177,59 @@ def process_company(row):
                 print(f"⚠️  Error al actualizar esquema: {str(schema_error)}")
                 print(f"⚠️  Continuando con el MERGE. Si falla, se manejará en el bloque de errores del MERGE.")
         
+        # Actualizar esquema de tabla final si hay campos que deben ser STRING
+        # Esto evita errores de tipo de dato en el MERGE
+        try:
+            final_table_check = bq_client.get_table(table_ref_final)
+            staging_table_check = bq_client.get_table(table_ref_staging)
+            
+            schema_updated = False
+            updated_schema = list(final_table_check.schema)
+            
+            # Verificar cada campo que debe ser STRING
+            for field_name in ALWAYS_STRING_FIELDS:
+                # Buscar en tabla final
+                final_field = None
+                for i, field in enumerate(updated_schema):
+                    if field.name == field_name:
+                        final_field = field
+                        final_field_index = i
+                        break
+                
+                # Buscar en staging
+                staging_field = None
+                for field in staging_table_check.schema:
+                    if field.name == field_name:
+                        staging_field = field
+                        break
+                
+                # Si el campo existe en ambos y el final es INTEGER pero staging es STRING, actualizar
+                if final_field and staging_field:
+                    if final_field.field_type != 'STRING' and staging_field.field_type == 'STRING':
+                        # Actualizar campo en esquema final
+                        updated_field = bigquery.SchemaField(
+                            field_name,
+                            'STRING',
+                            mode=final_field.mode,
+                            fields=final_field.fields,
+                            description=final_field.description
+                        )
+                        updated_schema[final_field_index] = updated_field
+                        schema_updated = True
+                        print(f"🔧 Actualizando esquema de tabla final: {field_name} de {final_field.field_type} a STRING")
+            
+            # Aplicar cambios al esquema si hubo actualizaciones
+            if schema_updated:
+                final_table_check.schema = updated_schema
+                bq_client.update_table(final_table_check, ['schema'])
+                print(f"✅ Esquema de tabla final actualizado")
+        except NotFound:
+            # Tabla final no existe aún, se creará con el esquema correcto
+            pass
+        except Exception as schema_update_error:
+            # Si falla la actualización del esquema, continuar (el MERGE manejará el error)
+            print(f"⚠️  Error actualizando esquema de tabla final: {str(schema_update_error)}")
+        
         # Asegurar que campos ETL existan antes de construir MERGE SQL
         final_table_refresh = bq_client.get_table(table_ref_final)
         has_etl_synced = any(col.name == '_etl_synced' for col in final_table_refresh.schema)
@@ -1233,18 +1308,11 @@ def process_company(row):
             merge_success = True
             print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
             
-            # Solo borrar tabla staging si el MERGE fue exitoso
-            delete_start = time.time()
-            bq_client.delete_table(table_ref_staging, not_found_ok=True)
-            delete_time = time.time() - delete_start
-            # if delete_time > 0.5:
-            #     print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada en {delete_time:.1f}s")
-            # else:
-            #     print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada")
-            
             # Paso 5: Endpoint completado (solo cuando MERGE es exitoso)
             endpoint_time = time.time() - endpoint_start_time
             print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
+            # Borrar staging después de MERGE exitoso
+            cleanup_staging_table(bq_client, table_ref_staging)
         except Exception as e:
             error_msg = str(e)
             merge_error_msg = error_msg
@@ -1751,6 +1819,10 @@ def process_company(row):
                         endpoint_time = time.time() - endpoint_start_time
                         print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                         continue  # Continuar al siguiente endpoint
+        
+        # Borrar staging siempre al final (incluso si hubo errores)
+        # El staging no se usa para monitoreo, así que siempre se limpia
+        cleanup_staging_table(bq_client_cleanup, table_ref_staging_cleanup)
         
         # Borrar archivos temporales
         try:
