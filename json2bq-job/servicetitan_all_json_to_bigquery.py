@@ -128,6 +128,20 @@ def load_endpoints_from_metadata():
 # Cargar endpoints automáticamente desde metadata
 ENDPOINTS = load_endpoints_from_metadata()
 
+# Campos que siempre deben ser STRING (no INTEGER) porque pueden contener letras o guiones
+# Estos campos son conocidos por tener valores alfanuméricos en algunas compañías
+ALWAYS_STRING_FIELDS = {
+    'job_number',      # Puede tener letras o guiones en migraciones
+    'project_number',  # Puede tener letras o guiones
+    'location_zip',    # Códigos postales pueden tener guiones (ej: "21061-3557")
+    'zip',             # Códigos postales pueden tener guiones
+    'postal_code',     # Códigos postales pueden tener guiones
+    'phone',           # Números de teléfono pueden tener guiones o paréntesis
+    'phone_number',    # Números de teléfono pueden tener guiones o paréntesis
+    'fax',             # Números de fax pueden tener guiones
+    'fax_number',      # Números de fax pueden tener guiones
+}
+
 # Función para convertir a snake_case
 def to_snake_case(name):
     name = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)
@@ -774,11 +788,85 @@ def process_company(row):
             bq_client.create_dataset(dataset)
             print(f"🆕 Dataset {dataset_staging} creado en proyecto {project_id}")
         
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            autodetect=True,
-            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-        )
+        # Obtener esquema autodetectado de una muestra y corregir campos conocidos que deben ser STRING
+        # Esto evita errores de tipo de dato desde el inicio
+        schema = None
+        try:
+            # Leer primeras líneas para obtener esquema
+            sample_file = f"/tmp/sample_schema_{project_id}_{table_name}.json"
+            with open(temp_fixed, 'r', encoding='utf-8') as f_in:
+                with open(sample_file, 'w', encoding='utf-8') as f_out:
+                    # Leer primeras 100 líneas para obtener esquema
+                    for i, line in enumerate(f_in):
+                        if i >= 100:
+                            break
+                        f_out.write(line)
+            
+            # Cargar muestra para obtener esquema autodetectado
+            sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_schema_sample")
+            sample_config = bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                autodetect=True,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+            )
+            
+            try:
+                sample_load_job = bq_client.load_table_from_file(
+                    open(sample_file, "rb"),
+                    sample_table_ref,
+                    job_config=sample_config
+                )
+                sample_load_job.result()
+                sample_table = bq_client.get_table(sample_table_ref)
+                schema = sample_table.schema
+                bq_client.delete_table(sample_table_ref, not_found_ok=True)
+                if os.path.exists(sample_file):
+                    os.remove(sample_file)
+                
+                # Corregir campos que siempre deben ser STRING
+                corrected_schema = []
+                fields_corrected = []
+                for field in schema:
+                    if field.name in ALWAYS_STRING_FIELDS and field.field_type != 'STRING':
+                        # Cambiar tipo a STRING
+                        corrected_field = bigquery.SchemaField(
+                            field.name,
+                            'STRING',
+                            mode=field.mode,
+                            fields=field.fields,
+                            description=field.description
+                        )
+                        corrected_schema.append(corrected_field)
+                        fields_corrected.append(f"{field.name} ({field.field_type}→STRING)")
+                    else:
+                        corrected_schema.append(field)
+                
+                if fields_corrected:
+                    schema = corrected_schema
+                    print(f"🔧 Campos corregidos a STRING desde el inicio: {', '.join(fields_corrected)}")
+            except Exception as sample_error:
+                # Si falla la muestra, continuar con autodetect normal
+                schema = None
+                bq_client.delete_table(sample_table_ref, not_found_ok=True)
+                if os.path.exists(sample_file):
+                    os.remove(sample_file)
+        except Exception as schema_error:
+            # Si hay error obteniendo esquema, continuar con autodetect normal
+            schema = None
+        
+        # Configurar job_config con esquema corregido o autodetect
+        if schema:
+            job_config = bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                schema=schema,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+            )
+        else:
+            job_config = bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                autodetect=True,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+            )
         
         # Intentar cargar directamente
         try:
