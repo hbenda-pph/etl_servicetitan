@@ -1046,39 +1046,20 @@ def load_json_to_staging_with_error_handling(
         if needs_fix and problematic_field:
             if fix_type == 'type_mismatch':
                 # Error de tipo de dato: corregir esquema
+                # Estrategia simplificada: eliminar tabla staging y recrearla con esquema corregido
                 try:
                     print(f"🔧 Intentando corregir esquema para campo {problematic_field}...")
                     
-                    # Inicializar current_schema como lista vacía desde el inicio
-                    current_schema = []
-                    
-                    # Estrategia simplificada: obtener esquema actual de staging (si existe)
-                    # Si no existe, usaremos solo el campo corregido y BigQuery inferirá el resto
+                    # Eliminar tabla staging si existe (para empezar limpio)
                     try:
-                        current_staging_table = bq_client.get_table(table_ref_staging)
-                        if current_staging_table and current_staging_table.schema:
-                            # Convertir schema tuple a lista de forma segura
-                            try:
-                                schema_tuple = current_staging_table.schema
-                                if schema_tuple:
-                                    current_schema = [field for field in schema_tuple]
-                                else:
-                                    current_schema = []
-                            except Exception as schema_error:
-                                print(f"⚠️  Error obteniendo schema de staging: {str(schema_error)[:100]}")
-                                current_schema = []
-                        else:
-                            current_schema = []  # Tabla existe pero sin schema
-                    except Exception:
-                        # Tabla no existe, usar lista vacía (BigQuery inferirá el resto automáticamente)
-                        current_schema = []
+                        bq_client.delete_table(table_ref_staging, not_found_ok=True)
+                        print(f"🧹 Tabla staging eliminada para recrear con esquema corregido")
+                    except Exception as delete_error:
+                        print(f"⚠️  Error eliminando tabla staging: {str(delete_error)[:100]}")
                     
-                    # Asegurar que current_schema es una lista (verificación final)
-                    if current_schema is None or not isinstance(current_schema, list):
-                        current_schema = []
-                    
-                    # Crear nuevo SchemaField con el tipo corregido a STRING
-                    corrected_field_new = bigquery.SchemaField(
+                    # Crear esquema mínimo con solo el campo problemático como STRING
+                    # BigQuery inferirá el resto de los campos automáticamente
+                    corrected_field = bigquery.SchemaField(
                         name=problematic_field,
                         field_type='STRING',  # Siempre corregir a STRING
                         mode='NULLABLE',
@@ -1086,66 +1067,72 @@ def load_json_to_staging_with_error_handling(
                         fields=None
                     )
                     
-                    # Reemplazar o agregar el campo corregido en el esquema
-                    # Verificación final antes de iterar (por si acaso)
-                    if current_schema is None:
-                        print(f"⚠️  current_schema es None, inicializando como lista vacía...")
-                        current_schema = []
-                    elif not isinstance(current_schema, list):
-                        print(f"⚠️  current_schema no es una lista (tipo: {type(current_schema)}), corrigiendo...")
-                        current_schema = []
+                    # Crear tabla staging con esquema parcial (solo el campo corregido)
+                    # BigQuery completará el resto con autodetect
+                    staging_table_obj = bigquery.Table(table_ref_staging, schema=[corrected_field])
+                    bq_client.create_table(staging_table_obj)
+                    print(f"✅ Tabla staging recreada con campo {problematic_field} como STRING")
                     
-                    # Verificación final antes de iterar - usar try-except en lugar de assert
-                    try:
-                        if not isinstance(current_schema, list):
-                            raise TypeError(f"current_schema debe ser lista, pero es {type(current_schema)}")
-                    except TypeError as type_err:
-                        print(f"❌ Error de tipo en current_schema: {str(type_err)}")
-                        current_schema = []
+                    # Cargar datos con autodetect para que BigQuery infiera el resto del esquema
+                    job_config_retry = bigquery.LoadJobConfig(
+                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                        autodetect=True,  # BigQuery inferirá el resto de los campos
+                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                        max_bad_records=0
+                    )
                     
-                    updated_schema = []
-                    field_replaced = False
-                    try:
-                        for field in current_schema:
-                            if field.name == problematic_field:
-                                # Reemplazar con el campo corregido
-                                updated_schema.append(corrected_field_new)
-                                field_replaced = True
-                            else:
-                                updated_schema.append(field)
-                    except TypeError as iter_error:
-                        # Si current_schema no es iterable, usar lista vacía
-                        print(f"❌ Error iterando sobre current_schema: {str(iter_error)}")
-                        print(f"   Tipo de current_schema: {type(current_schema)}")
-                        current_schema = []
-                        updated_schema = []
-                        field_replaced = False
-                    
-                    if not field_replaced:
-                        # Campo no existe en esquema, agregarlo
-                        updated_schema.append(corrected_field_new)
-                    
-                    # Actualizar o crear tabla staging con esquema corregido
-                    staging_table_obj = bigquery.Table(table_ref_staging, schema=updated_schema)
-                    try:
-                        bq_client.update_table(staging_table_obj, ['schema'])
-                    except:
-                        # Tabla no existe, crearla
-                        bq_client.create_table(staging_table_obj)
-                    
-                    print(f"✅ Campo {problematic_field} convertido a STRING en esquema")
-                    
-                    # Reintentar carga con esquema corregido
-                    job_config.schema = updated_schema
+                    # Asegurar que el campo problemático sea STRING en el esquema final
+                    # Cargar primero para que BigQuery infiera el esquema completo
                     load_job_retry = bq_client.load_table_from_file(
                         open(temp_fixed, "rb"),
                         table_ref_staging,
-                        job_config=job_config
+                        job_config=job_config_retry
                     )
                     load_job_retry.result()
+                    
+                    # Obtener el esquema inferido y corregir el campo problemático si es necesario
+                    final_table = bq_client.get_table(table_ref_staging)
+                    if final_table and final_table.schema:
+                        updated_schema = []
+                        field_found = False
+                        for field in final_table.schema:
+                            if field.name == problematic_field:
+                                # Reemplazar con STRING
+                                updated_schema.append(corrected_field)
+                                field_found = True
+                            else:
+                                updated_schema.append(field)
+                        
+                        if not field_found:
+                            updated_schema.append(corrected_field)
+                        
+                        # Actualizar esquema con el campo corregido
+                        final_table.schema = updated_schema
+                        bq_client.update_table(final_table, ['schema'])
+                        print(f"✅ Esquema actualizado: campo {problematic_field} forzado a STRING")
+                    
+                    # Recargar datos con el esquema corregido
+                    job_config_final = bigquery.LoadJobConfig(
+                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                        schema=updated_schema if 'updated_schema' in locals() else [corrected_field],
+                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                        max_bad_records=0
+                    )
+                    
+                    load_job_final = bq_client.load_table_from_file(
+                        open(temp_fixed, "rb"),
+                        table_ref_staging,
+                        job_config=job_config_final
+                    )
+                    load_job_final.result()
+                    
                     load_time = time.time() - load_start
+                    print(f"✅ Datos cargados exitosamente con esquema corregido")
                     return (True, load_time, None)
                 except Exception as schema_error:
+                    import traceback
+                    error_trace = traceback.format_exc()
+                    print(f"❌ Error completo en corrección de esquema:\n{error_trace}")
                     return (False, 0, f"Error corrigiendo esquema: {str(schema_error)}")
             elif fix_type == 'repeated':
                 # Campo REPEATED con NULL: re-transformar datos
