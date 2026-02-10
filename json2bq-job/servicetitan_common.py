@@ -356,7 +356,8 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
         # Archivos <100MB: procesamiento en memoria (ya está implementado)
         pass
     
-    # Procesamiento en memoria para archivos pequeños (más rápido)
+    # Procesamiento en memoria - SIMPLIFICADO Y ROBUSTO
+    print(f"📖 Cargando JSON completo en memoria...")
     with open(local_path, 'r', encoding='utf-8') as f:
         first_char = f.read(1)
         f.seek(0)
@@ -368,27 +369,48 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
             # Newline-delimited JSON
             json_data = [json.loads(line) for line in f if line.strip()]
     
+    total_items = len(json_data)
+    print(f"✅ JSON cargado: {total_items:,} items en memoria")
+    
     # Detectar campos array (usando snake_case para campos de nivel superior)
     if repeated_fields is None:
         repeated_fields = set()
-        for item in json_data[:1000]:  # Muestra de primeros 1000 items
-            for k, v in item.items():
-                snake_key = to_snake_case(k)
-                if isinstance(v, list):
-                    repeated_fields.add(snake_key)
+        sample_size = min(1000, total_items)
+        for item in json_data[:sample_size]:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    snake_key = to_snake_case(k)
+                    if isinstance(v, list):
+                        repeated_fields.add(snake_key)
     
-    # Transformar cada item
+    # Transformar cada item con progreso
+    print(f"🔄 Transformando {total_items:,} items a snake_case...")
     transformed_items = []
+    items_processed = 0
+    start_transform = time.time()
+    last_progress = start_transform
+    
     for item in json_data:
         transformed_item = transform_item(item, repeated_fields)
         transformed_items.append(transformed_item)
+        items_processed += 1
+        
+        # Mostrar progreso cada 1000 items o cada 5 segundos
+        current_time = time.time()
+        if (items_processed % 1000 == 0) or (current_time - last_progress >= 5):
+            elapsed = current_time - start_transform
+            rate = items_processed / elapsed if elapsed > 0 else 0
+            print(f"  📊 {items_processed:,}/{total_items:,} items ({rate:.0f} items/seg)")
+            last_progress = current_time
     
     # Escribir como newline-delimited JSON
+    print(f"💾 Escribiendo archivo transformado...")
     with open(temp_path, 'w', encoding='utf-8') as f:
         for item in transformed_items:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
     
-    print(f"✅ Transformación completada: {len(transformed_items):,} items procesados")
+    transform_time = time.time() - start_transform
+    print(f"✅ Transformación completada: {len(transformed_items):,} items procesados en {transform_time:.1f}s ({len(transformed_items)/transform_time:.0f} items/seg)")
 
 def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
     """Versión streaming de fix_json_format para archivos grandes.
@@ -1059,12 +1081,15 @@ def load_json_to_staging_with_error_handling(
                             )
                             sample_load_job.result()
                             sample_table = bq_client.get_table(sample_table_ref)
-                            if sample_table.schema:
+                            if sample_table and sample_table.schema:
                                 current_schema = list(sample_table.schema)  # Convertir a lista para poder modificar
+                            else:
+                                current_schema = []  # Asegurar que es lista
                             bq_client.delete_table(sample_table_ref, not_found_ok=True)
                         except Exception as infer_error:
                             print(f"⚠️  Error infiriendo esquema de muestra: {str(infer_error)[:200]}")
                             # Continuar con esquema vacío, se agregará solo el campo corregido
+                            current_schema = []  # Asegurar que es lista
                         finally:
                             if os.path.exists(sample_file):
                                 try:
@@ -1072,8 +1097,8 @@ def load_json_to_staging_with_error_handling(
                                 except:
                                     pass
                     
-                    # Asegurar que current_schema es una lista
-                    if current_schema is None:
+                    # Asegurar que current_schema es una lista (verificación final)
+                    if current_schema is None or not isinstance(current_schema, list):
                         current_schema = []
                     
                     # Crear nuevo SchemaField con el tipo corregido a STRING
@@ -1086,6 +1111,11 @@ def load_json_to_staging_with_error_handling(
                     )
                     
                     # Reemplazar o agregar el campo corregido en el esquema
+                    # Verificación final antes de iterar (por si acaso)
+                    if not isinstance(current_schema, list):
+                        print(f"⚠️  current_schema no es una lista, corrigiendo...")
+                        current_schema = []
+                    
                     updated_schema = []
                     field_replaced = False
                     for field in current_schema:
