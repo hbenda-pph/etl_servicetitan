@@ -388,6 +388,14 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
     start_time = time.time()
     last_progress_time = start_time
     
+    # Asegurar que el archivo de salida esté limpio (por si una ejecución previa falló)
+    # Esto es diferente de la tabla staging - este es un archivo local en disco
+    if os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass  # Continuar si no se puede eliminar
+    
     # Detectar campos array en una muestra
     if repeated_fields is None:
         repeated_fields = set()
@@ -462,6 +470,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                 buffer = ""
                 chunk_size = 64 * 1024  # 64KB chunks para balance entre memoria y eficiencia
                 array_started = False
+                items_since_last_progress = 0  # Inicializar UNA VEZ fuera del loop de chunks
                 
                 # Leer y procesar en chunks
                 while True:
@@ -485,6 +494,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                     # Parsear todos los items completos en el buffer
                     parse_attempts = 0
                     max_parse_attempts = 1000  # Evitar loops infinitos
+                    
                     while buffer and parse_attempts < max_parse_attempts:
                         parse_attempts += 1
                         buffer = buffer.lstrip()
@@ -496,6 +506,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             transformed = transform_item(obj, repeated_fields)
                             f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                             items_processed += 1
+                            items_since_last_progress += 1
                             
                             # Avanzar después del item
                             buffer = buffer[consumed:].lstrip()
@@ -506,13 +517,14 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             # Resetear contador de intentos después de parsear exitosamente
                             parse_attempts = 0
                             
-                            # Mostrar progreso cada 10 segundos
+                            # Mostrar progreso cada 10 segundos O cada 1000 items (lo que ocurra primero)
                             current_time = time.time()
-                            if current_time - last_progress_time >= 10:
+                            if (current_time - last_progress_time >= 10) or (items_since_last_progress >= 1000):
                                 elapsed = current_time - start_time
                                 rate = items_processed / elapsed if elapsed > 0 else 0
                                 print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
                                 last_progress_time = current_time
+                                items_since_last_progress = 0
                         except (ValueError, json.JSONDecodeError) as e:
                             # Item incompleto o mal formado
                             # Si no hay más chunk, intentar avanzar manualmente para no quedarse atascado
@@ -537,6 +549,17 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                     
                     # Si no hay más datos y el buffer está vacío o solo tiene ']', terminamos
                     if not chunk:
+                        # Verificar si quedó algo en el buffer antes de terminar
+                        buffer_remaining = buffer.lstrip()
+                        if buffer_remaining and buffer_remaining != ']':
+                            # Hay datos sin procesar - intentar parsear uno más
+                            try:
+                                obj, consumed = decoder.raw_decode(buffer_remaining.rstrip(',').rstrip(']').strip())
+                                transformed = transform_item(obj, repeated_fields)
+                                f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
+                                items_processed += 1
+                            except:
+                                pass  # Ignorar si no se puede parsear
                         break
             else:
                 # Newline-delimited JSON - más simple
