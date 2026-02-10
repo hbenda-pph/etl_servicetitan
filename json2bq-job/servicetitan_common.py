@@ -1052,64 +1052,26 @@ def load_json_to_staging_with_error_handling(
                     # Inicializar current_schema como lista vacía desde el inicio
                     current_schema = []
                     
-                    # Estrategia simplificada: crear esquema directamente con el campo corregido
-                    # Obtener esquema actual de staging (si existe) o crear uno nuevo
+                    # Estrategia simplificada: obtener esquema actual de staging (si existe)
+                    # Si no existe, usaremos solo el campo corregido y BigQuery inferirá el resto
                     try:
                         current_staging_table = bq_client.get_table(table_ref_staging)
                         if current_staging_table and current_staging_table.schema:
+                            # Convertir schema tuple a lista de forma segura
                             try:
-                                current_schema = list(current_staging_table.schema) if current_staging_table.schema else []
-                            except:
-                                current_schema = []  # Si falla, usar lista vacía
+                                schema_tuple = current_staging_table.schema
+                                if schema_tuple:
+                                    current_schema = [field for field in schema_tuple]
+                                else:
+                                    current_schema = []
+                            except Exception as schema_error:
+                                print(f"⚠️  Error obteniendo schema de staging: {str(schema_error)[:100]}")
+                                current_schema = []
                         else:
                             current_schema = []  # Tabla existe pero sin schema
-                    except:
-                        # Tabla no existe, necesitamos inferir esquema de una muestra
-                        current_schema = []  # Inicializar como lista vacía
-                        sample_file = f"/tmp/sample_{project_id}_{table_name}.json"
-                        try:
-                            with open(temp_fixed, 'r', encoding='utf-8') as f_in:
-                                with open(sample_file, 'w', encoding='utf-8') as f_out:
-                                    for i, line in enumerate(f_in):
-                                        if i >= 50:  # Solo primeras 50 líneas para inferir esquema
-                                            break
-                                        f_out.write(line)
-                            
-                            # Cargar muestra para obtener esquema autodetectado
-                            sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample")
-                            sample_config = bigquery.LoadJobConfig(
-                                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                                autodetect=True,
-                                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-                            )
-                            
-                            sample_load_job = bq_client.load_table_from_file(
-                                open(sample_file, "rb"),
-                                sample_table_ref,
-                                job_config=sample_config
-                            )
-                            sample_load_job.result()
-                            sample_table = bq_client.get_table(sample_table_ref)
-                            if sample_table and sample_table.schema:
-                                try:
-                                    schema_list = list(sample_table.schema) if sample_table.schema else []
-                                    current_schema = schema_list if schema_list is not None else []
-                                except Exception as list_error:
-                                    print(f"⚠️  Error convirtiendo schema a lista: {str(list_error)[:100]}")
-                                    current_schema = []
-                            else:
-                                current_schema = []  # Asegurar que es lista
-                            bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                        except Exception as infer_error:
-                            print(f"⚠️  Error infiriendo esquema de muestra: {str(infer_error)[:200]}")
-                            # Continuar con esquema vacío, se agregará solo el campo corregido
-                            current_schema = []  # Asegurar que es lista
-                        finally:
-                            if os.path.exists(sample_file):
-                                try:
-                                    os.remove(sample_file)
-                                except:
-                                    pass
+                    except Exception:
+                        # Tabla no existe, usar lista vacía (BigQuery inferirá el resto automáticamente)
+                        current_schema = []
                     
                     # Asegurar que current_schema es una lista (verificación final)
                     if current_schema is None or not isinstance(current_schema, list):
