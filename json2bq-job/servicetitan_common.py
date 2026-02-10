@@ -1049,11 +1049,20 @@ def load_json_to_staging_with_error_handling(
                 try:
                     print(f"🔧 Intentando corregir esquema para campo {problematic_field}...")
                     
+                    # Inicializar current_schema como lista vacía desde el inicio
+                    current_schema = []
+                    
                     # Estrategia simplificada: crear esquema directamente con el campo corregido
                     # Obtener esquema actual de staging (si existe) o crear uno nuevo
                     try:
                         current_staging_table = bq_client.get_table(table_ref_staging)
-                        current_schema = list(current_staging_table.schema)
+                        if current_staging_table and current_staging_table.schema:
+                            try:
+                                current_schema = list(current_staging_table.schema) if current_staging_table.schema else []
+                            except:
+                                current_schema = []  # Si falla, usar lista vacía
+                        else:
+                            current_schema = []  # Tabla existe pero sin schema
                     except:
                         # Tabla no existe, necesitamos inferir esquema de una muestra
                         current_schema = []  # Inicializar como lista vacía
@@ -1082,7 +1091,12 @@ def load_json_to_staging_with_error_handling(
                             sample_load_job.result()
                             sample_table = bq_client.get_table(sample_table_ref)
                             if sample_table and sample_table.schema:
-                                current_schema = list(sample_table.schema)  # Convertir a lista para poder modificar
+                                try:
+                                    schema_list = list(sample_table.schema) if sample_table.schema else []
+                                    current_schema = schema_list if schema_list is not None else []
+                                except Exception as list_error:
+                                    print(f"⚠️  Error convirtiendo schema a lista: {str(list_error)[:100]}")
+                                    current_schema = []
                             else:
                                 current_schema = []  # Asegurar que es lista
                             bq_client.delete_table(sample_table_ref, not_found_ok=True)
@@ -1112,19 +1126,38 @@ def load_json_to_staging_with_error_handling(
                     
                     # Reemplazar o agregar el campo corregido en el esquema
                     # Verificación final antes de iterar (por si acaso)
-                    if not isinstance(current_schema, list):
-                        print(f"⚠️  current_schema no es una lista, corrigiendo...")
+                    if current_schema is None:
+                        print(f"⚠️  current_schema es None, inicializando como lista vacía...")
+                        current_schema = []
+                    elif not isinstance(current_schema, list):
+                        print(f"⚠️  current_schema no es una lista (tipo: {type(current_schema)}), corrigiendo...")
+                        current_schema = []
+                    
+                    # Verificación final antes de iterar - usar try-except en lugar de assert
+                    try:
+                        if not isinstance(current_schema, list):
+                            raise TypeError(f"current_schema debe ser lista, pero es {type(current_schema)}")
+                    except TypeError as type_err:
+                        print(f"❌ Error de tipo en current_schema: {str(type_err)}")
                         current_schema = []
                     
                     updated_schema = []
                     field_replaced = False
-                    for field in current_schema:
-                        if field.name == problematic_field:
-                            # Reemplazar con el campo corregido
-                            updated_schema.append(corrected_field_new)
-                            field_replaced = True
-                        else:
-                            updated_schema.append(field)
+                    try:
+                        for field in current_schema:
+                            if field.name == problematic_field:
+                                # Reemplazar con el campo corregido
+                                updated_schema.append(corrected_field_new)
+                                field_replaced = True
+                            else:
+                                updated_schema.append(field)
+                    except TypeError as iter_error:
+                        # Si current_schema no es iterable, usar lista vacía
+                        print(f"❌ Error iterando sobre current_schema: {str(iter_error)}")
+                        print(f"   Tipo de current_schema: {type(current_schema)}")
+                        current_schema = []
+                        updated_schema = []
+                        field_replaced = False
                     
                     if not field_replaced:
                         # Campo no existe en esquema, agregarlo
