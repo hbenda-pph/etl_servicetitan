@@ -1062,9 +1062,8 @@ def load_json_to_staging_with_error_handling(
                     corrected_field = bigquery.SchemaField(
                         name=problematic_field,
                         field_type='STRING',  # Siempre corregir a STRING
-                        mode='NULLABLE',
-                        description=None,
-                        fields=None
+                        mode='NULLABLE'
+                        # No pasar fields=None, dejar que use el valor por defecto
                     )
                     
                     # Crear tabla staging con esquema parcial (solo el campo corregido)
