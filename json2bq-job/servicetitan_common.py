@@ -1066,54 +1066,81 @@ def load_json_to_staging_with_error_handling(
                         # No pasar fields=None, dejar que use el valor por defecto
                     )
                     
-                    # Crear tabla staging con esquema parcial (solo el campo corregido)
-                    # BigQuery completará el resto con autodetect
-                    staging_table_obj = bigquery.Table(table_ref_staging, schema=[corrected_field])
-                    bq_client.create_table(staging_table_obj)
-                    print(f"✅ Tabla staging recreada con campo {problematic_field} como STRING")
+                    # Estrategia: inferir esquema de una muestra pequeña, corregir el campo problemático,
+                    # y luego cargar todos los datos con el esquema corregido
+                    sample_file = f"/tmp/sample_{project_id}_{table_name}_schema.json"
+                    sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample_schema")
                     
-                    # Cargar datos con autodetect para que BigQuery infiera el resto del esquema
-                    job_config_retry = bigquery.LoadJobConfig(
-                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                        autodetect=True,  # BigQuery inferirá el resto de los campos
-                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                        max_bad_records=0
-                    )
-                    
-                    # Asegurar que el campo problemático sea STRING en el esquema final
-                    # Cargar primero para que BigQuery infiera el esquema completo
-                    load_job_retry = bq_client.load_table_from_file(
-                        open(temp_fixed, "rb"),
-                        table_ref_staging,
-                        job_config=job_config_retry
-                    )
-                    load_job_retry.result()
-                    
-                    # Obtener el esquema inferido y corregir el campo problemático si es necesario
-                    final_table = bq_client.get_table(table_ref_staging)
-                    if final_table and final_table.schema:
-                        updated_schema = []
-                        field_found = False
-                        for field in final_table.schema:
-                            if field.name == problematic_field:
-                                # Reemplazar con STRING
+                    try:
+                        # Crear muestra pequeña (primeras 100 líneas) para inferir esquema
+                        with open(temp_fixed, 'r', encoding='utf-8') as f_in:
+                            with open(sample_file, 'w', encoding='utf-8') as f_out:
+                                for i, line in enumerate(f_in):
+                                    if i >= 100:  # Solo primeras 100 líneas
+                                        break
+                                    f_out.write(line)
+                        
+                        # Cargar muestra con autodetect para inferir esquema completo
+                        sample_config = bigquery.LoadJobConfig(
+                            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                            autodetect=True,
+                            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+                        )
+                        
+                        sample_load_job = bq_client.load_table_from_file(
+                            open(sample_file, "rb"),
+                            sample_table_ref,
+                            job_config=sample_config
+                        )
+                        sample_load_job.result()
+                        
+                        # Obtener esquema inferido
+                        sample_table = bq_client.get_table(sample_table_ref)
+                        if sample_table and sample_table.schema:
+                            # Construir esquema corregido: reemplazar campo problemático con STRING
+                            updated_schema = []
+                            field_found = False
+                            for field in sample_table.schema:
+                                if field.name == problematic_field:
+                                    # Reemplazar con STRING
+                                    updated_schema.append(corrected_field)
+                                    field_found = True
+                                else:
+                                    updated_schema.append(field)
+                            
+                            if not field_found:
+                                # Campo no estaba en el esquema inferido, agregarlo
                                 updated_schema.append(corrected_field)
-                                field_found = True
-                            else:
-                                updated_schema.append(field)
+                            
+                            print(f"✅ Esquema inferido y corregido: campo {problematic_field} forzado a STRING")
+                        else:
+                            # Si no se pudo inferir, usar solo el campo corregido
+                            updated_schema = [corrected_field]
+                            print(f"⚠️  No se pudo inferir esquema completo, usando solo campo {problematic_field} como STRING")
                         
-                        if not field_found:
-                            updated_schema.append(corrected_field)
+                        # Limpiar tabla de muestra
+                        bq_client.delete_table(sample_table_ref, not_found_ok=True)
                         
-                        # Actualizar esquema con el campo corregido
-                        final_table.schema = updated_schema
-                        bq_client.update_table(final_table, ['schema'])
-                        print(f"✅ Esquema actualizado: campo {problematic_field} forzado a STRING")
+                    except Exception as sample_error:
+                        print(f"⚠️  Error infiriendo esquema de muestra: {str(sample_error)[:200]}")
+                        # Si falla, usar solo el campo corregido
+                        updated_schema = [corrected_field]
+                    finally:
+                        if os.path.exists(sample_file):
+                            try:
+                                os.remove(sample_file)
+                            except:
+                                pass
                     
-                    # Recargar datos con el esquema corregido
+                    # Crear tabla staging con esquema corregido completo
+                    staging_table_obj = bigquery.Table(table_ref_staging, schema=updated_schema)
+                    bq_client.create_table(staging_table_obj)
+                    print(f"✅ Tabla staging recreada con esquema corregido ({len(updated_schema)} campos)")
+                    
+                    # Cargar todos los datos con el esquema corregido
                     job_config_final = bigquery.LoadJobConfig(
                         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                        schema=updated_schema if 'updated_schema' in locals() else [corrected_field],
+                        schema=updated_schema,
                         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
                         max_bad_records=0
                     )
