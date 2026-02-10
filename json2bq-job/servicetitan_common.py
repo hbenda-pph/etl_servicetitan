@@ -483,7 +483,10 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             break
                     
                     # Parsear todos los items completos en el buffer
-                    while buffer:
+                    parse_attempts = 0
+                    max_parse_attempts = 1000  # Evitar loops infinitos
+                    while buffer and parse_attempts < max_parse_attempts:
+                        parse_attempts += 1
                         buffer = buffer.lstrip()
                         if not buffer or buffer[0] == ']':
                             break
@@ -500,6 +503,9 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             if buffer and buffer[0] == ',':
                                 buffer = buffer[1:].lstrip()
                             
+                            # Resetear contador de intentos después de parsear exitosamente
+                            parse_attempts = 0
+                            
                             # Mostrar progreso cada 10 segundos
                             current_time = time.time()
                             if current_time - last_progress_time >= 10:
@@ -508,13 +514,26 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                                 print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
                                 last_progress_time = current_time
                         except (ValueError, json.JSONDecodeError) as e:
-                            # Item incompleto, necesitamos más datos del siguiente chunk
-                            # Si no hay más chunk, puede ser un error real
+                            # Item incompleto o mal formado
+                            # Si no hay más chunk, intentar avanzar manualmente para no quedarse atascado
                             if not chunk:
-                                if items_processed == 0:
-                                    print(f"⚠️  Error parseando JSON: {str(e)[:200]}")
+                                # Intentar avanzar saltando caracteres hasta encontrar una coma o ']'
+                                # Esto ayuda a recuperarse de items mal formados
+                                found_separator = False
+                                for i, char in enumerate(buffer[:1000]):  # Buscar en próximos 1000 caracteres
+                                    if char == ',' or char == ']':
+                                        buffer = buffer[i+1:].lstrip()
+                                        found_separator = True
+                                        break
+                                
+                                if not found_separator:
+                                    # No se encontró separador, probablemente fin del archivo
+                                    if items_processed == 0:
+                                        print(f"⚠️  Error parseando JSON: {str(e)[:200]}")
+                                    break
+                            else:
+                                # Hay más datos, esperar al siguiente chunk
                                 break
-                            break
                     
                     # Si no hay más datos y el buffer está vacío o solo tiene ']', terminamos
                     if not chunk:
@@ -981,33 +1000,47 @@ def load_json_to_staging_with_error_handling(
                         current_schema = list(current_staging_table.schema)
                     except:
                         # Tabla no existe, necesitamos inferir esquema de una muestra
+                        current_schema = []  # Inicializar como lista vacía
                         sample_file = f"/tmp/sample_{project_id}_{table_name}.json"
-                        with open(temp_fixed, 'r', encoding='utf-8') as f_in:
-                            with open(sample_file, 'w', encoding='utf-8') as f_out:
-                                for i, line in enumerate(f_in):
-                                    if i >= 50:  # Solo primeras 50 líneas para inferir esquema
-                                        break
-                                    f_out.write(line)
-                        
-                        # Cargar muestra para obtener esquema autodetectado
-                        sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample")
-                        sample_config = bigquery.LoadJobConfig(
-                            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                            autodetect=True,
-                            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-                        )
-                        
-                        sample_load_job = bq_client.load_table_from_file(
-                            open(sample_file, "rb"),
-                            sample_table_ref,
-                            job_config=sample_config
-                        )
-                        sample_load_job.result()
-                        sample_table = bq_client.get_table(sample_table_ref)
-                        current_schema = list(sample_table.schema)  # Convertir a lista para poder modificar
-                        bq_client.delete_table(sample_table_ref, not_found_ok=True)
-                        if os.path.exists(sample_file):
-                            os.remove(sample_file)
+                        try:
+                            with open(temp_fixed, 'r', encoding='utf-8') as f_in:
+                                with open(sample_file, 'w', encoding='utf-8') as f_out:
+                                    for i, line in enumerate(f_in):
+                                        if i >= 50:  # Solo primeras 50 líneas para inferir esquema
+                                            break
+                                        f_out.write(line)
+                            
+                            # Cargar muestra para obtener esquema autodetectado
+                            sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample")
+                            sample_config = bigquery.LoadJobConfig(
+                                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                                autodetect=True,
+                                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+                            )
+                            
+                            sample_load_job = bq_client.load_table_from_file(
+                                open(sample_file, "rb"),
+                                sample_table_ref,
+                                job_config=sample_config
+                            )
+                            sample_load_job.result()
+                            sample_table = bq_client.get_table(sample_table_ref)
+                            if sample_table.schema:
+                                current_schema = list(sample_table.schema)  # Convertir a lista para poder modificar
+                            bq_client.delete_table(sample_table_ref, not_found_ok=True)
+                        except Exception as infer_error:
+                            print(f"⚠️  Error infiriendo esquema de muestra: {str(infer_error)[:200]}")
+                            # Continuar con esquema vacío, se agregará solo el campo corregido
+                        finally:
+                            if os.path.exists(sample_file):
+                                try:
+                                    os.remove(sample_file)
+                                except:
+                                    pass
+                    
+                    # Asegurar que current_schema es una lista
+                    if current_schema is None:
+                        current_schema = []
                     
                     # Crear nuevo SchemaField con el tipo corregido a STRING
                     corrected_field_new = bigquery.SchemaField(
