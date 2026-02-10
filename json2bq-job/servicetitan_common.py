@@ -340,10 +340,21 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
     # Detectar tamaño del archivo
     file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
     LARGE_FILE_THRESHOLD_MB = 100  # Usar streaming para archivos >100MB
+    VERY_LARGE_FILE_THRESHOLD_MB = 1000  # Para archivos >1GB, forzar streaming
     
-    if file_size_mb > LARGE_FILE_THRESHOLD_MB:
-        # Usar procesamiento streaming para archivos grandes
+    # Para archivos entre 100MB y 1GB, cargar completo es más confiable que parsing incremental
+    # El parsing incremental con raw_decode puede atascarse en items problemáticos
+    if file_size_mb > VERY_LARGE_FILE_THRESHOLD_MB:
+        # Archivos >1GB: usar streaming (parsing incremental)
         return fix_json_format_streaming(local_path, temp_path, repeated_fields)
+    elif file_size_mb > LARGE_FILE_THRESHOLD_MB:
+        # Archivos 100MB-1GB: cargar completo en memoria (más confiable)
+        # 906MB es grande pero manejable en la mayoría de sistemas
+        print(f"📦 Archivo grande ({file_size_mb:.2f} MB) pero <1GB. Cargando completo en memoria para mayor confiabilidad...")
+        # Continuar con procesamiento en memoria (código más abajo)
+    else:
+        # Archivos <100MB: procesamiento en memoria (ya está implementado)
+        pass
     
     # Procesamiento en memoria para archivos pequeños (más rápido)
     with open(local_path, 'r', encoding='utf-8') as f:
