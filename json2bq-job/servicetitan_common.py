@@ -907,11 +907,13 @@ def load_json_to_staging_with_error_handling(
         )
         
         try:
-            sample_load_job = bq_client.load_table_from_file(
-                open(sample_file, "rb"),
-                sample_table_ref,
-                job_config=sample_config
-            )
+            # Abrir archivo de muestra de forma segura
+            with open(sample_file, "rb") as sample_f:
+                sample_load_job = bq_client.load_table_from_file(
+                    sample_f,
+                    sample_table_ref,
+                    job_config=sample_config
+                )
             sample_load_job.result()
             sample_table = bq_client.get_table(sample_table_ref)
             schema = sample_table.schema
@@ -945,11 +947,13 @@ def load_json_to_staging_with_error_handling(
     # Intentar cargar directamente
     load_job = None
     try:
-        load_job = bq_client.load_table_from_file(
-            open(temp_fixed, "rb"),
-            table_ref_staging,
-            job_config=job_config
-        )
+        # Abrir archivo de forma segura con context manager
+        with open(temp_fixed, "rb") as f:
+            load_job = bq_client.load_table_from_file(
+                f,
+                table_ref_staging,
+                job_config=job_config
+            )
         load_job.result()
         load_time = time.time() - load_start
         return (True, load_time, None)
@@ -1087,12 +1091,14 @@ def load_json_to_staging_with_error_handling(
                             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
                         )
                         
-                        sample_load_job = bq_client.load_table_from_file(
-                            open(sample_file, "rb"),
-                            sample_table_ref,
-                            job_config=sample_config
-                        )
-                        sample_load_job.result()
+                        # Abrir archivo de muestra de forma segura
+                        with open(sample_file, "rb") as sample_f:
+                            sample_load_job = bq_client.load_table_from_file(
+                                sample_f,
+                                sample_table_ref,
+                                job_config=sample_config
+                            )
+                            sample_load_job.result()
                         
                         # Obtener esquema inferido
                         sample_table = bq_client.get_table(sample_table_ref)
@@ -1138,23 +1144,74 @@ def load_json_to_staging_with_error_handling(
                     print(f"✅ Tabla staging recreada con esquema corregido ({len(updated_schema)} campos)")
                     
                     # Cargar todos los datos con el esquema corregido
-                    job_config_final = bigquery.LoadJobConfig(
-                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                        schema=updated_schema,
-                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                        max_bad_records=0
-                    )
+                    # Si hay más errores de tipo, detectarlos y corregirlos recursivamente
+                    max_retries = 3  # Máximo 3 intentos de corrección
+                    retry_count = 0
+                    current_schema = updated_schema
                     
-                    load_job_final = bq_client.load_table_from_file(
-                        open(temp_fixed, "rb"),
-                        table_ref_staging,
-                        job_config=job_config_final
-                    )
-                    load_job_final.result()
-                    
-                    load_time = time.time() - load_start
-                    print(f"✅ Datos cargados exitosamente con esquema corregido")
-                    return (True, load_time, None)
+                    while retry_count < max_retries:
+                        try:
+                            job_config_final = bigquery.LoadJobConfig(
+                                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                                schema=current_schema,
+                                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                                max_bad_records=0
+                            )
+                            
+                            # Abrir archivo de forma segura con context manager
+                            with open(temp_fixed, "rb") as f:
+                                load_job_final = bq_client.load_table_from_file(
+                                    f,
+                                    table_ref_staging,
+                                    job_config=job_config_final
+                                )
+                                load_job_final.result()
+                            
+                            load_time = time.time() - load_start
+                            print(f"✅ Datos cargados exitosamente con esquema corregido")
+                            return (True, load_time, None)
+                            
+                        except Exception as load_error:
+                            error_msg = str(load_error)
+                            # Buscar si hay otro campo problemático en el error
+                            match = re.search(r"Could not convert.*?Field:\s*([\w_]+)", error_msg, re.IGNORECASE | re.DOTALL)
+                            if match and retry_count < max_retries - 1:
+                                another_field = match.group(1)
+                                if another_field != problematic_field:
+                                    print(f"🔍 Detectado otro campo problemático: {another_field}")
+                                    # Corregir este campo también
+                                    another_corrected_field = bigquery.SchemaField(
+                                        name=another_field,
+                                        field_type='STRING',
+                                        mode='NULLABLE'
+                                    )
+                                    # Actualizar esquema
+                                    new_schema = []
+                                    field_replaced = False
+                                    for field in current_schema:
+                                        if field.name == another_field:
+                                            new_schema.append(another_corrected_field)
+                                            field_replaced = True
+                                        else:
+                                            new_schema.append(field)
+                                    if not field_replaced:
+                                        new_schema.append(another_corrected_field)
+                                    
+                                    current_schema = new_schema
+                                    # Actualizar tabla con nuevo esquema
+                                    staging_table_obj = bigquery.Table(table_ref_staging, schema=current_schema)
+                                    try:
+                                        bq_client.update_table(staging_table_obj, ['schema'])
+                                    except:
+                                        bq_client.delete_table(table_ref_staging, not_found_ok=True)
+                                        bq_client.create_table(staging_table_obj)
+                                    
+                                    print(f"✅ Campo {another_field} también convertido a STRING")
+                                    retry_count += 1
+                                    continue
+                            
+                            # Si no hay más campos para corregir o alcanzamos el máximo, lanzar error
+                            raise
                 except Exception as schema_error:
                     import traceback
                     error_trace = traceback.format_exc()
