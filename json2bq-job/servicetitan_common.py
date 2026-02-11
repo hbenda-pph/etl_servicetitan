@@ -1158,14 +1158,15 @@ def load_json_to_staging_with_error_handling(
                                 max_bad_records=0
                             )
                             
-                            # Abrir archivo de forma segura con context manager
+                            # Cargar archivo - BigQuery necesita que el archivo esté abierto
                             with open(temp_fixed, "rb") as f:
                                 load_job_final = bq_client.load_table_from_file(
                                     f,
                                     table_ref_staging,
                                     job_config=job_config_final
                                 )
-                                load_job_final.result()
+                            # Esperar resultado fuera del context manager
+                            load_job_final.result()
                             
                             load_time = time.time() - load_start
                             print(f"✅ Datos cargados exitosamente con esquema corregido")
@@ -1173,11 +1174,40 @@ def load_json_to_staging_with_error_handling(
                             
                         except Exception as load_error:
                             error_msg = str(load_error)
-                            # Buscar si hay otro campo problemático en el error
-                            match = re.search(r"Could not convert.*?Field:\s*([\w_]+)", error_msg, re.IGNORECASE | re.DOTALL)
-                            if match and retry_count < max_retries - 1:
-                                another_field = match.group(1)
-                                if another_field != problematic_field:
+                            
+                            # Intentar obtener detalles del error del job
+                            another_field = None
+                            try:
+                                if hasattr(load_job_final, 'errors') and load_job_final.errors:
+                                    for err in load_job_final.errors:
+                                        err_str = str(err)
+                                        # Buscar campo problemático en el error
+                                        match = re.search(r"Could not convert.*?Field:\s*([\w_]+)", err_str, re.IGNORECASE | re.DOTALL)
+                                        if match:
+                                            another_field = match.group(1)
+                                            break
+                            except:
+                                pass
+                            
+                            # Si no se encontró en errors, buscar en el mensaje completo
+                            if not another_field:
+                                # Buscar todos los campos mencionados en el error
+                                all_fields = re.findall(r'Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
+                                if all_fields:
+                                    # Usar el último campo encontrado (generalmente el más específico)
+                                    another_field = all_fields[-1]
+                                else:
+                                    # Intentar buscar con el patrón "Could not convert"
+                                    match = re.search(r"Could not convert.*?Field:\s*([\w_]+)", error_msg, re.IGNORECASE | re.DOTALL)
+                                    if match:
+                                        another_field = match.group(1)
+                            
+                            # Si encontramos otro campo problemático y no es el mismo que ya corregimos
+                            if another_field and another_field != problematic_field and retry_count < max_retries - 1:
+                                # Verificar que no hayamos corregido este campo ya
+                                already_corrected = any(f.name == another_field and f.field_type == 'STRING' for f in current_schema)
+                                
+                                if not already_corrected:
                                     print(f"🔍 Detectado otro campo problemático: {another_field}")
                                     # Corregir este campo también
                                     another_corrected_field = bigquery.SchemaField(
@@ -1207,6 +1237,36 @@ def load_json_to_staging_with_error_handling(
                                         bq_client.create_table(staging_table_obj)
                                     
                                     print(f"✅ Campo {another_field} también convertido a STRING")
+                                    retry_count += 1
+                                    continue
+                            
+                            # Si no encontramos campo específico pero hay error, intentar usar autodetect con max_bad_records
+                            if not another_field and retry_count < max_retries - 1:
+                                print(f"⚠️  Error genérico detectado, intentando con autodetect y max_bad_records=10...")
+                                try:
+                                    # Eliminar tabla y recrear con autodetect permitiendo algunos errores
+                                    bq_client.delete_table(table_ref_staging, not_found_ok=True)
+                                    job_config_autodetect = bigquery.LoadJobConfig(
+                                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                                        autodetect=True,
+                                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                                        max_bad_records=10  # Permitir algunos errores para ver qué campos fallan
+                                    )
+                                    with open(temp_fixed, "rb") as f:
+                                        load_job_autodetect = bq_client.load_table_from_file(
+                                            f,
+                                            table_ref_staging,
+                                            job_config=job_config_autodetect
+                                        )
+                                    # Esperar resultado fuera del context manager
+                                    load_job_autodetect.result()
+                                    
+                                    # Si llegamos aquí, la carga fue exitosa con autodetect
+                                    load_time = time.time() - load_start
+                                    print(f"✅ Datos cargados exitosamente con autodetect (algunos registros pueden haberse omitido)")
+                                    return (True, load_time, None)
+                                except Exception as autodetect_error:
+                                    print(f"⚠️  Autodetect también falló: {str(autodetect_error)[:200]}")
                                     retry_count += 1
                                     continue
                             
