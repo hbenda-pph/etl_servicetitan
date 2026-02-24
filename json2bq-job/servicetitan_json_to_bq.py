@@ -1,11 +1,13 @@
 """
 Script de prueba para procesar datos de ServiceTitan JSON a BigQuery.
-Permite procesar una sola compañía y/o un solo endpoint para pruebas locales.
+Permite procesar una sola compañía o todas las compañías activas, y/o un solo endpoint para pruebas locales.
 
 Uso:
     python servicetitan_json_to_bq.py --company-id 1
     python servicetitan_json_to_bq.py --company-id 1 --endpoint "gross-pay-items"
     python servicetitan_json_to_bq.py --company-id 1 --endpoint "gross-pay-items" --dry-run
+    python servicetitan_json_to_bq.py  # Procesa todas las compañías activas
+    python servicetitan_json_to_bq.py --endpoint "gross-pay-items"  # Procesa todas las compañías con un endpoint específico
 """
 
 import argparse
@@ -338,8 +340,14 @@ Ejemplos:
   # Procesar todos los endpoints de la compañía 1
   python servicetitan_json_to_bq.py --company-id 1
   
-  # Procesar solo un endpoint específico
+  # Procesar solo un endpoint específico de la compañía 1
   python servicetitan_json_to_bq.py --company-id 1 --endpoint "gross-pay-items"
+  
+  # Procesar todas las compañías activas
+  python servicetitan_json_to_bq.py
+  
+  # Procesar todas las compañías activas con un endpoint específico
+  python servicetitan_json_to_bq.py --endpoint "gross-pay-items"
   
   # Modo dry-run (solo mostrar qué haría)
   python servicetitan_json_to_bq.py --company-id 1 --endpoint "gross-pay-items" --dry-run
@@ -349,8 +357,8 @@ Ejemplos:
     parser.add_argument(
         '--company-id',
         type=int,
-        required=True,
-        help='ID de la compañía a procesar'
+        required=False,
+        help='ID de la compañía a procesar. Si no se especifica, procesa todas las compañías activas.'
     )
     
     parser.add_argument(
@@ -371,7 +379,10 @@ Ejemplos:
     print(f"\n{'='*80}")
     print("🔍 Script de Prueba: ServiceTitan JSON → BigQuery")
     print(f"{'='*80}")
-    print(f"📋 Compañía ID: {args.company_id}")
+    if args.company_id:
+        print(f"📋 Compañía ID: {args.company_id}")
+    else:
+        print(f"📋 Compañía ID: TODAS (compañías activas)")
     if args.endpoint:
         print(f"📋 Endpoint(s): {', '.join(args.endpoint)}")
     else:
@@ -381,42 +392,78 @@ Ejemplos:
     print(f"🔍 Project ID para queries: {PROJECT_ID_FOR_QUERY}")
     print(f"{'='*80}\n")
     
-    # Conectar a BigQuery y obtener la compañía
-    print("Conectando a BigQuery para obtener compañía...")
+    # Conectar a BigQuery y obtener la(s) compañía(s)
+    print("Conectando a BigQuery para obtener compañía(s)...")
     # Usar PROJECT_ID_FOR_QUERY explícitamente para evitar errores de detección automática
     client = bigquery.Client(project=PROJECT_ID_FOR_QUERY)
-    query = f"""
-        SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
-        WHERE company_id = @company_id
-        AND company_bigquery_status = TRUE
-        LIMIT 1
-    """
     
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("company_id", "INT64", args.company_id)
-        ]
-    )
+    if args.company_id:
+        # Procesar solo una compañía específica
+        query = f"""
+            SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
+            WHERE company_id = @company_id
+            AND company_bigquery_status = TRUE
+            LIMIT 1
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("company_id", "INT64", args.company_id)
+            ]
+        )
+        
+        results = list(client.query(query, job_config=job_config).result())
+        
+        if not results:
+            print(f"❌ No se encontró compañía con ID {args.company_id} o no está activa (company_bigquery_status = TRUE)")
+            return
+        
+        companies = results
+    else:
+        # Procesar todas las compañías activas
+        query = f"""
+            SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
+            WHERE company_bigquery_status = TRUE
+            ORDER BY company_id
+        """
+        
+        results = list(client.query(query).result())
+        
+        if not results:
+            print(f"❌ No se encontraron compañías activas (company_bigquery_status = TRUE)")
+            return
+        
+        companies = results
+        print(f"📊 Se encontraron {len(companies)} compañía(s) activa(s) para procesar\n")
     
-    results = list(client.query(query, job_config=job_config).result())
+    # Procesar cada compañía
+    total_companies = len(companies)
+    processed_count = 0
+    failed_count = 0
     
-    if not results:
-        print(f"❌ No se encontró compañía con ID {args.company_id} o no está activa (company_bigquery_status = TRUE)")
-        return
+    for idx, row in enumerate(companies, 1):
+        try:
+            print(f"\n{'#'*80}")
+            print(f"📊 Procesando compañía {idx} de {total_companies}")
+            print(f"{'#'*80}")
+            process_company(row, endpoints_filter=args.endpoint, dry_run=args.dry_run)
+            processed_count += 1
+        except Exception as e:
+            failed_count += 1
+            print(f"\n{'='*80}")
+            print(f"❌ Error procesando compañía {row.company_id} ({row.company_name}): {str(e)}")
+            print(f"{'='*80}")
+            # Continuar con la siguiente compañía en lugar de detener todo el proceso
+            continue
     
-    row = results[0]
-    
-    # Procesar compañía
-    try:
-        process_company(row, endpoints_filter=args.endpoint, dry_run=args.dry_run)
-        print(f"\n{'='*80}")
-        print(f"✅ Procesamiento completado")
-        print(f"{'='*80}")
-    except Exception as e:
-        print(f"\n{'='*80}")
-        print(f"❌ Error procesando compañía: {str(e)}")
-        print(f"{'='*80}")
-        raise
+    # Resumen final
+    print(f"\n{'='*80}")
+    print(f"✅ Procesamiento completado")
+    print(f"📊 Total de compañías: {total_companies}")
+    print(f"✅ Procesadas exitosamente: {processed_count}")
+    if failed_count > 0:
+        print(f"❌ Fallidas: {failed_count}")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":
