@@ -18,7 +18,6 @@ from google.api_core.exceptions import NotFound
 
 from servicetitan_common import (
     load_endpoints_from_metadata,
-    log_event_bq,
     fix_json_format,
     load_json_to_staging_with_error_handling,
     validate_json_file,
@@ -88,15 +87,15 @@ def process_company(row):
     if not project_id:
         raise ValueError(f"company_project_id vacío para company_id={company_id}. Primero crea el proyecto INBOX por compañía.")
     
-    # Log de inicio de procesamiento de compañía
-    log_event_bq(
-        company_id=company_id,
-        company_name=company_name,
-        project_id=project_id,
-        event_type="INFO",
-        event_title="Inicio procesamiento compañía",
-        event_message=f"Iniciando procesamiento de {company_name} (ID: {company_id})"
-    )
+    # Log de inicio de procesamiento de compañía [COMENTADO]
+    # log_event_bq(
+    #     company_id=company_id,
+    #     company_name=company_name,
+    #     project_id=project_id,
+    #     event_type="INFO",
+    #     event_title="Inicio procesamiento compañía",
+    #     event_message=f"Iniciando procesamiento de {company_name} (ID: {company_id})"
+    # )
     
     print(f"\n{'='*80}\n🏢 Procesando compañía INBOX: {company_name} (ID: {company_id}) | project_id: {project_id}")
     bucket_name = f"{project_id}_servicetitan"
@@ -109,44 +108,44 @@ def process_company(row):
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
-        # Log de inicio de procesamiento de endpoint
-        log_event_bq(
-            company_id=company_id,
-            company_name=company_name,
-            project_id=project_id,
-            endpoint=endpoint_name,
-            event_type="INFO",
-            event_title="Inicio procesamiento endpoint",
-            event_message=f"Procesando endpoint {endpoint_name} (tabla: {table_name}) para {company_name}"
-        )
+        # Log de inicio de procesamiento de endpoint [COMENTADO]
+        # log_event_bq(
+        #     company_id=company_id,
+        #     company_name=company_name,
+        #     project_id=project_id,
+        #     endpoint=endpoint_name,
+        #     event_type="INFO",
+        #     event_title="Inicio procesamiento endpoint",
+        #     event_message=f"Procesando endpoint {endpoint_name} (tabla: {table_name}) para {company_name}"
+        # )
         
         # Descargar archivo JSON del bucket
         try:
             blob = bucket.blob(json_filename)
             if not blob.exists():
-                log_event_bq(
-                    company_id=company_id,
-                    company_name=company_name,
-                    project_id=project_id,
-                    endpoint=endpoint_name,
-                    event_type="WARNING",
-                    event_title="Archivo no encontrado",
-                    event_message=f"Archivo {json_filename} no encontrado en bucket {bucket_name}"
-                )
+                # log_event_bq( [COMENTADO]
+                #     company_id=company_id,
+                #     company_name=company_name,
+                #     project_id=project_id,
+                #     endpoint=endpoint_name,
+                #     event_type="WARNING",
+                #     event_title="Archivo no encontrado",
+                #     event_message=f"Archivo {json_filename} no encontrado en bucket {bucket_name}"
+                # )
                 print(f"⚠️  Archivo no encontrado: {json_filename} en bucket {bucket_name}")
                 continue
             blob.download_to_filename(temp_json)
             print(f"⬇️  Descargado {json_filename} de gs://{bucket_name}")
         except Exception as e:
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="ERROR",
-                event_title="Error descargando archivo",
-                event_message=f"Error descargando {json_filename}: {str(e)}"
-            )
+            # log_event_bq( [COMENTADO]
+            #     company_id=company_id,
+            #     company_name=company_name,
+            #     project_id=project_id,
+            #     endpoint=endpoint_name,
+            #     event_type="ERROR",
+            #     event_title="Error descargando archivo",
+            #     event_message=f"Error descargando {json_filename}: {str(e)}"
+            # )
             print(f"❌ Error descargando {json_filename}: {str(e)}")
             continue
         
@@ -155,15 +154,15 @@ def process_company(row):
             fix_json_format(temp_json, temp_fixed)
             print(f"🔄 Transformado a newline-delimited y snake_case: {temp_fixed}")
         except Exception as e:
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="ERROR",
-                event_title="Error transformando archivo",
-                event_message=f"Error transformando {json_filename}: {str(e)}"
-            )
+            # log_event_bq( [COMENTADO]
+            #     company_id=company_id,
+            #     company_name=company_name,
+            #     project_id=project_id,
+            #     endpoint=endpoint_name,
+            #     event_type="ERROR",
+            #     event_title="Error transformando archivo",
+            #     event_message=f"Error transformando {json_filename}: {str(e)}"
+            # )
             print(f"❌ Error transformando {json_filename}: {str(e)}")
             continue
         
@@ -202,15 +201,15 @@ def process_company(row):
             load_job.result()
             print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging}")
             
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="SUCCESS",
-                event_title="Carga a staging exitosa",
-                event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging}"
-            )
+            # log_event_bq( [COMENTADO]
+            #     company_id=company_id,
+            #     company_name=company_name,
+            #     project_id=project_id,
+            #     endpoint=endpoint_name,
+            #     event_type="SUCCESS",
+            #     event_title="Carga a staging exitosa",
+            #     event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging}"
+            # )
         except Exception as e:
             error_msg = str(e)
             # Intentar extraer campo REPEATED del mensaje de error
@@ -235,37 +234,37 @@ def process_company(row):
                     load_job.result()
                     print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza)")
                     
-                    log_event_bq(
-                        company_id=company_id,
-                        company_name=company_name,
-                        project_id=project_id,
-                        endpoint=endpoint_name,
-                        event_type="SUCCESS",
-                        event_title="Carga a staging exitosa (después de limpieza)",
-                        event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging} después de limpiar campo {problematic_field}"
-                    )
+                    # log_event_bq( [COMENTADO]
+                    #     company_id=company_id,
+                    #     company_name=company_name,
+                    #     project_id=project_id,
+                    #     endpoint=endpoint_name,
+                    #     event_type="SUCCESS",
+                    #     event_title="Carga a staging exitosa (después de limpieza)",
+                    #     event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging} después de limpiar campo {problematic_field}"
+                    # )
                 except Exception as retry_error:
-                    log_event_bq(
-                        company_id=company_id,
-                        company_name=company_name,
-                        project_id=project_id,
-                        endpoint=endpoint_name,
-                        event_type="ERROR",
-                        event_title="Error cargando a staging (después de limpieza)",
-                        event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
-                    )
+                    # log_event_bq( [COMENTADO]
+                    #     company_id=company_id,
+                    #     company_name=company_name,
+                    #     project_id=project_id,
+                    #     endpoint=endpoint_name,
+                    #     event_type="ERROR",
+                    #     event_title="Error cargando a staging (después de limpieza)",
+                    #     event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
+                    # )
                     print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
                     continue
             else:
-                log_event_bq(
-                    company_id=company_id,
-                    company_name=company_name,
-                    project_id=project_id,
-                    endpoint=endpoint_name,
-                    event_type="ERROR",
-                    event_title="Error cargando a staging",
-                    event_message=f"Error cargando a tabla staging: {error_msg}"
-                )
+                # log_event_bq( [COMENTADO]
+                #     company_id=company_id,
+                #     company_name=company_name,
+                #     project_id=project_id,
+                #     endpoint=endpoint_name,
+                #     event_type="ERROR",
+                #     event_title="Error cargando a staging",
+                #     event_message=f"Error cargando a tabla staging: {error_msg}"
+                # )
                 print(f"❌ Error cargando a tabla staging: {error_msg}")
                 continue
         
@@ -286,15 +285,15 @@ def process_company(row):
             bq_client.create_table(table)
             print(f"🆕 Tabla final {dataset_final}.{table_final} creada con esquema ETL.")
             
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="INFO",
-                event_title="Tabla final creada",
-                event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente con campos ETL"
-            )
+            # log_event_bq( [COMENTADO]
+            #     company_id=company_id,
+            #     company_name=company_name,
+            #     project_id=project_id,
+            #     endpoint=endpoint_name,
+            #     event_type="INFO",
+            #     event_title="Tabla final creada",
+            #     event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente con campos ETL"
+            # )
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
         # Obtener esquemas de ambas tablas
@@ -355,19 +354,19 @@ def process_company(row):
             query_job.result()
             print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
             
-            # Solo borrar tabla staging si el MERGE fue exitoso
+            # Borrar tabla staging
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
             print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
             
-            log_event_bq(
-                company_id=company_id,
-                company_name=company_name,
-                project_id=project_id,
-                endpoint=endpoint_name,
-                event_type="SUCCESS",
-                event_title="MERGE exitoso",
-                event_message=f"MERGE con Soft Delete ejecutado exitosamente y tabla staging eliminada"
-            )
+            # log_event_bq( [COMENTADO]
+            #     company_id=company_id,
+            #     company_name=company_name,
+            #     project_id=project_id,
+            #     endpoint=endpoint_name,
+            #     event_type="SUCCESS",
+            #     event_title="MERGE exitoso",
+            #     event_message=f"MERGE con Soft Delete ejecutado exitosamente y tabla staging eliminada"
+            # )
         except Exception as e:
             error_msg = str(e)
             # Detectar error de incompatibilidad de STRUCT
@@ -418,38 +417,38 @@ def process_company(row):
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
                         print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
                         
-                        log_event_bq(
-                            company_id=company_id,
-                            company_name=company_name,
-                            project_id=project_id,
-                            endpoint=endpoint_name,
-                            event_type="SUCCESS",
-                            event_title="MERGE exitoso (después de actualizar STRUCT)",
-                            event_message=f"MERGE ejecutado exitosamente después de actualizar esquema de {problematic_struct_field}"
-                        )
+                        # log_event_bq( [COMENTADO]
+                        #     company_id=company_id,
+                        #     company_name=company_name,
+                        #     project_id=project_id,
+                        #     endpoint=endpoint_name,
+                        #     event_type="SUCCESS",
+                        #     event_title="MERGE exitoso (después de actualizar STRUCT)",
+                        #     event_message=f"MERGE ejecutado exitosamente después de actualizar esquema de {problematic_struct_field}"
+                        # )
                     except Exception as retry_error:
-                        log_event_bq(
-                            company_id=company_id,
-                            company_name=company_name,
-                            project_id=project_id,
-                            endpoint=endpoint_name,
-                            event_type="ERROR",
-                            event_title="Error en MERGE (después de actualizar STRUCT)",
-                            event_message=f"Error en MERGE después de actualizar {problematic_struct_field}: {str(retry_error)}",
-                            info={"merge_sql": merge_sql}
-                        )
+                        # log_event_bq( [COMENTADO]
+                        #     company_id=company_id,
+                        #     company_name=company_name,
+                        #     project_id=project_id,
+                        #     endpoint=endpoint_name,
+                        #     event_type="ERROR",
+                        #     event_title="Error en MERGE (después de actualizar STRUCT)",
+                        #     event_message=f"Error en MERGE después de actualizar {problematic_struct_field}: {str(retry_error)}",
+                        #     info={"merge_sql": merge_sql}
+                        # )
                         print(f"❌ Error en MERGE después de actualizar STRUCT: {str(retry_error)}")
                 else:
-                    log_event_bq(
-                        company_id=company_id,
-                        company_name=company_name,
-                        project_id=project_id,
-                        endpoint=endpoint_name,
-                        event_type="ERROR",
-                        event_title="Error en MERGE",
-                        event_message=f"Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging. {error_msg}",
-                        info={"merge_sql": merge_sql}
-                    )
+                    # log_event_bq( [COMENTADO]
+                    #     company_id=company_id,
+                    #     company_name=company_name,
+                    #     project_id=project_id,
+                    #     endpoint=endpoint_name,
+                    #     event_type="ERROR",
+                    #     event_title="Error en MERGE",
+                    #     event_message=f"Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging. {error_msg}",
+                    #     info={"merge_sql": merge_sql}
+                    # )
                     print(f"❌ Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging")
             elif type_mismatch:
                 # Campo cambió de tipo (ej: INT64 -> STRING)
@@ -495,50 +494,50 @@ def process_company(row):
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
                         print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
                         
-                        log_event_bq(
-                            company_id=company_id,
-                            company_name=company_name,
-                            project_id=project_id,
-                            endpoint=endpoint_name,
-                            event_type="SUCCESS",
-                            event_title="MERGE exitoso (después de actualizar tipo)",
-                            event_message=f"MERGE ejecutado exitosamente después de actualizar tipo de {problematic_field} de {old_type} a {new_type}"
-                        )
+                        # log_event_bq( [COMENTADO]
+                        #     company_id=company_id,
+                        #     company_name=company_name,
+                        #     project_id=project_id,
+                        #     endpoint=endpoint_name,
+                        #     event_type="SUCCESS",
+                        #     event_title="MERGE exitoso (después de actualizar tipo)",
+                        #     event_message=f"MERGE ejecutado exitosamente después de actualizar tipo de {problematic_field} de {old_type} a {new_type}"
+                        # )
                     except Exception as retry_error:
-                        log_event_bq(
-                            company_id=company_id,
-                            company_name=company_name,
-                            project_id=project_id,
-                            endpoint=endpoint_name,
-                            event_type="ERROR",
-                            event_title="Error en MERGE (después de actualizar tipo)",
-                            event_message=f"Error en MERGE después de actualizar tipo de {problematic_field}: {str(retry_error)}",
-                            info={"merge_sql": merge_sql}
-                        )
+                        # log_event_bq( [COMENTADO]
+                        #     company_id=company_id,
+                        #     company_name=company_name,
+                        #     project_id=project_id,
+                        #     endpoint=endpoint_name,
+                        #     event_type="ERROR",
+                        #     event_title="Error en MERGE (después de actualizar tipo)",
+                        #     event_message=f"Error en MERGE después de actualizar tipo de {problematic_field}: {str(retry_error)}",
+                        #     info={"merge_sql": merge_sql}
+                        # )
                         print(f"❌ Error en MERGE después de actualizar tipo: {str(retry_error)}")
                 else:
-                    log_event_bq(
-                        company_id=company_id,
-                        company_name=company_name,
-                        project_id=project_id,
-                        endpoint=endpoint_name,
-                        event_type="ERROR",
-                        event_title="Error en MERGE",
-                        event_message=f"Error en MERGE: campo {problematic_field} no encontrado en staging. {error_msg}",
-                        info={"merge_sql": merge_sql}
-                    )
+                    # log_event_bq( [COMENTADO]
+                    #     company_id=company_id,
+                    #     company_name=company_name,
+                    #     project_id=project_id,
+                    #     endpoint=endpoint_name,
+                    #     event_type="ERROR",
+                    #     event_title="Error en MERGE",
+                    #     event_message=f"Error en MERGE: campo {problematic_field} no encontrado en staging. {error_msg}",
+                    #     info={"merge_sql": merge_sql}
+                    # )
                     print(f"❌ Error en MERGE: campo {problematic_field} no encontrado en staging")
             else:
-                log_event_bq(
-                    company_id=company_id,
-                    company_name=company_name,
-                    project_id=project_id,
-                    endpoint=endpoint_name,
-                    event_type="ERROR",
-                    event_title="Error en MERGE",
-                    event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",
-                    info={"merge_sql": merge_sql}
-                )
+                # log_event_bq( [COMENTADO]
+                #     company_id=company_id,
+                #     company_name=company_name,
+                #     project_id=project_id,
+                #     endpoint=endpoint_name,
+                #     event_type="ERROR",
+                #     event_title="Error en MERGE",
+                #     event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",
+                #     info={"merge_sql": merge_sql}
+                # )
                 print(f"❌ Error en MERGE o borrado de staging: {error_msg} (la tabla staging NO se borra para depuración)")
         
         # Borrar archivos temporales
@@ -548,23 +547,23 @@ def process_company(row):
         except Exception:
             pass
     
-    # Log de fin de procesamiento de compañía
-    log_event_bq(
-        company_id=company_id,
-        company_name=company_name,
-        project_id=project_id,
-        event_type="SUCCESS",
-        event_title="Fin procesamiento compañía",
-        event_message=f"Procesamiento completado para {company_name}"
-    )
+    # Log de fin de procesamiento de compañía [COMENTADO]
+    # log_event_bq(
+    #     company_id=company_id,
+    #     company_name=company_name,
+    #     project_id=project_id,
+    #     event_type="SUCCESS",
+    #     event_title="Fin procesamiento compañía",
+    #     event_message=f"Procesamiento completado para {company_name}"
+    # )
 
 def main():
-    # Log de inicio del proceso ETL
-    log_event_bq(
-        event_type="INFO",
-        event_title="Inicio proceso ETL",
-        event_message="Iniciando proceso ETL de ServiceTitan para compañía INBOX"
-    )
+    # Log de inicio del proceso ETL [COMENTADO]
+    # log_event_bq(
+    #     event_type="INFO",
+    #     event_title="Inicio proceso ETL",
+    #     event_message="Iniciando proceso ETL de ServiceTitan para compañía INBOX"
+    # )
     
     # INBOX (multi-compañía): itera todas las compañías activas en pph-inbox.settings.companies
     print("Conectando a BigQuery para obtener compañías INBOX...")
@@ -578,11 +577,11 @@ def main():
     results = list(client.query(query).result())
     
     if not results:
-        log_event_bq(
-            event_type="ERROR",
-            event_title="No se encontró compañía INBOX",
-            event_message="No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id)."
-        )
+        # log_event_bq( [COMENTADO]
+        #     event_type="ERROR",
+        #     event_title="No se encontró compañía INBOX",
+        #     event_message="No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id)."
+        # )
         print("❌ No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id).")
         return
     
@@ -596,24 +595,24 @@ def main():
             process_company(row)
         except Exception as e:
             failed += 1
-            log_event_bq(
-                company_id=row.company_id,
-                company_name=row.company_name,
-                project_id=row.company_project_id,
-                event_type="ERROR",
-                event_title="Error procesando compañía",
-                event_message=f"Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}"
-            )
+            # log_event_bq( [COMENTADO]
+            #     company_id=row.company_id,
+            #     company_name=row.company_name,
+            #     project_id=row.company_project_id,
+            #     event_type="ERROR",
+            #     event_title="Error procesando compañía",
+            #     event_message=f"Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}"
+            # )
             print(f"❌ Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}")
 
         print(f"\n{'='*80}")
 
-    # Log de fin del proceso ETL
-    log_event_bq(
-        event_type="SUCCESS" if failed == 0 else "WARNING",
-        event_title="Fin proceso ETL",
-        event_message=f"Proceso ETL INBOX finalizado. Total: {total}, fallidas: {failed}."
-    )
+    # Log de fin del proceso ETL [COMENTADO]
+    # log_event_bq(
+    #     event_type="SUCCESS" if failed == 0 else "WARNING",
+    #     event_title="Fin proceso ETL",
+    #     event_message=f"Proceso ETL INBOX finalizado. Total: {total}, fallidas: {failed}."
+    # )
 
     print(f"🏁 Procesamiento INBOX completado. Total: {total}, fallidas: {failed}.")
 
