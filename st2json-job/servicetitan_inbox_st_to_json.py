@@ -18,6 +18,7 @@ from servicetitan_common import (
     ServiceTitanAuth,
     ensure_bucket_exists,
     load_endpoints_from_metadata,
+    upload_to_bucket,
 )
 
 # Fuente de configuración INBOX
@@ -28,14 +29,6 @@ TABLE_NAME = "companies"
 # Lista de endpoints grandes que requieren streaming (alineado con script normal)
 LARGE_ENDPOINTS = ["gross-pay-items"]
 
-
-def upload_to_bucket(bucket_name: str, project_id: str, local_file: str, dest_blob_name: str) -> None:
-    """
-    Subida a Cloud Storage.
-    Mantiene el uso de `gsutil` para compatibilidad con el entorno de Cloud Run Jobs.
-    """
-    # Nota: bucket_name ya incluye el project_id (ej: pph-inbox-2_servicetitan)
-    os.system(f"gsutil -q cp {local_file} gs://{bucket_name}/{dest_blob_name}")
 
 def process_company(row):
     # Obtener credenciales y datos
