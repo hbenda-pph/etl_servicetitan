@@ -1,222 +1,38 @@
+"""
+ETL INBOX: JSON (Cloud Storage) → BigQuery
+
+Refactorizado para quedar alineado con `servicetitan_json_to_bq.py`,
+reutilizando `servicetitan_common.py` del job json2bq.
+
+Salvedades INBOX:
+- la tabla de configuración se lee desde `pph-inbox.settings.companies`
+- procesa múltiples compañías activas (company_bigquery_status = TRUE)
+- cada compañía escribe en su propio proyecto temporal (usa `company_project_id`)
+"""
+
 import os
-import json
 import re
-from datetime import datetime, timezone
+import time
 from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
 
-# Configuración de BigQuery para la tabla de compañías INBOX
-PROJECT_SOURCE = "pph-inbox"
+from servicetitan_common import (
+    load_endpoints_from_metadata,
+    log_event_bq,
+    fix_json_format,
+    load_json_to_staging_with_error_handling,
+    validate_json_file,
+    align_schemas_before_merge,
+    execute_merge_or_insert,
+)
+
+# Fuente de configuración INBOX
+PROJECT_ID_FOR_QUERY = "pph-inbox"
 DATASET_NAME = "settings"
 TABLE_NAME = "companies"
 
-# Configuración para logging centralizado
-LOGS_PROJECT = "platform-partners-des"
-LOGS_DATASET = "logs"
-LOGS_TABLE = "etl_servicetitan"
-
-# Configuración para tabla de metadata
-METADATA_PROJECT = "pph-central"
-METADATA_DATASET = "management"
-METADATA_TABLE = "metadata_consolidated_tables"
-
-def load_endpoints_from_metadata():
-    """
-    Carga los endpoints automáticamente desde metadata_consolidated_tables.
-    Retorna tuplas (endpoint_name, table_name) donde:
-    - endpoint_name: endpoint_metadata.name (usado para logging)
-    - table_name: nombre de la tabla (usado para archivos JSON y tablas BigQuery)
-    
-    Returns:
-        Lista de tuplas [(endpoint_name, table_name), ...]
-    """
-    try:
-        client = bigquery.Client(project=METADATA_PROJECT)
-        query = f"""
-            SELECT 
-                endpoint_metadata.name,
-                table_name
-            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE endpoint_metadata IS NOT NULL
-              AND active = TRUE
-            ORDER BY endpoint_metadata.module, endpoint_metadata.name
-        """
-        
-        job_config = bigquery.QueryJobConfig()
-        
-        query_job = client.query(query, job_config=job_config)
-        results = list(query_job.result())
-        
-        endpoints = [(row.name, row.table_name) for row in results]
-        print(f"✅ Total endpoints cargados desde metadata: {len(endpoints)}")
-        return endpoints
-        
-    except Exception as e:
-        print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
-        print(f"⚠️  Usando lista de endpoints por defecto (hardcoded)")
-        # Fallback a lista por defecto si hay error
-        return [
-            "job-types",
-            "technicians",
-            "campaigns",
-            "jobs_timesheets",
-            "purchase-orders",
-            "returns"
-        ]
-
-# Cargar endpoints automáticamente desde metadata
+# Endpoints desde metadata (centralizada)
 ENDPOINTS = load_endpoints_from_metadata()
-
-# Función para convertir a snake_case
-def to_snake_case(name):
-    name = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)
-    return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
-
-# Configuración para tabla de metadata
-METADATA_PROJECT = "pph-central"
-METADATA_DATASET = "management"
-METADATA_TABLE = "metadata_consolidated_tables"
-
-# Cache para nombres de tablas (evita consultas repetidas)
-_table_name_cache = {}
-
-def get_standardized_table_name(endpoint):
-    """
-    Obtiene el nombre estandarizado de la tabla desde metadata_consolidated_tables.
-    Si no se encuentra en la tabla de metadata, usa normalización por defecto.
-    
-    Args:
-        endpoint: Nombre del endpoint (ej: "business-units", "job-types")
-    
-    Returns:
-        Nombre estandarizado de la tabla
-    """
-    # Usar cache si ya se consultó antes
-    cache_key = endpoint
-    if cache_key in _table_name_cache:
-        return _table_name_cache[cache_key]
-    
-    try:
-        # Consultar tabla de metadata
-        client = bigquery.Client(project=METADATA_PROJECT)
-        # Consulta que busca por endpoint_metadata.name, retorna table_name directamente
-        query = f"""
-            SELECT table_name
-            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
-            WHERE endpoint_metadata.name = @endpoint
-            LIMIT 1
-        """
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("endpoint", "STRING", endpoint)
-            ]
-        )
-        
-        query_job = client.query(query, job_config=job_config)
-        results = list(query_job.result())
-        
-        if results:
-            table_name = results[0].table_name
-            _table_name_cache[cache_key] = table_name
-            print(f"📋 Tabla estandarizada desde metadata: {endpoint} -> {table_name}")
-            return table_name
-        else:
-            # Si no se encuentra en metadata, usar normalización por defecto
-            print(f"⚠️  Endpoint '{endpoint}' no encontrado en metadata, usando normalización por defecto")
-            normalized = _normalize_table_name_fallback(endpoint)
-            _table_name_cache[cache_key] = normalized
-            return normalized
-            
-    except Exception as e:
-        # En caso de error, usar normalización por defecto
-        print(f"⚠️  Error consultando metadata para '{endpoint}': {str(e)}. Usando normalización por defecto")
-        normalized = _normalize_table_name_fallback(endpoint)
-        _table_name_cache[cache_key] = normalized
-        return normalized
-
-def _normalize_table_name_fallback(endpoint):
-    """
-    Función de respaldo para normalizar nombres cuando no se encuentra en metadata.
-    Convierte guiones y slashes a underscores.
-    """
-    normalized = endpoint.replace("/", "_").replace("-", "_")
-    normalized = re.sub(r'_+', '_', normalized)
-    normalized = normalized.strip('_')
-    return normalized
-
-def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=None, 
-                event_type="INFO", event_title="", event_message="", info=None):
-    """Inserta un evento en la tabla de logs centralizada."""
-    try:
-        client = bigquery.Client(project=LOGS_PROJECT)
-        table_id = f"{LOGS_DATASET}.{LOGS_TABLE}"
-        
-        row = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "company_id": str(company_id) if company_id else None,
-            "company_name": company_name,
-            "project_id": project_id,
-            "endpoint": endpoint,
-            "event_type": event_type,
-            "event_title": event_title,
-            "event_message": event_message,
-            "source": "servicetitan_inbox_json_to_bigquery",
-            "info": json.dumps(info) if info else None
-        }
-        
-        errors = client.insert_rows_json(table_id, [row])
-        if errors:
-            print(f"❌ Error insertando log en BigQuery: {errors}")
-    except Exception as e:
-        print(f"❌ Error en logging: {str(e)}")
-
-def fix_json_format(local_path, temp_path, repeated_fields=None):
-    """Transforma el JSON a formato newline-delimited y snake_case.
-    Soporta tanto JSON array como newline-delimited JSON.
-    Si se proporciona repeated_fields, convierte NULL a [] para esos campos."""
-    with open(local_path, 'r', encoding='utf-8') as f:
-        first_char = f.read(1)
-        f.seek(0)
-        
-        if first_char == '[':
-            # JSON array tradicional
-            json_data = json.load(f)
-        else:
-            # Newline-delimited JSON
-            json_data = [json.loads(line) for line in f if line.strip()]
-    
-    # Detectar campos que son arrays en al menos un registro
-    detected_array_fields = set()
-    for item in json_data:
-        for key, value in item.items():
-            if isinstance(value, list):
-                detected_array_fields.add(to_snake_case(key))
-    
-    # Combinar campos detectados con los proporcionados (si hay)
-    array_fields = detected_array_fields
-    if repeated_fields:
-        array_fields = array_fields | set(repeated_fields)
-    
-    # Transformar y limpiar
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        for item in json_data:
-            new_item = {}
-            for k, v in item.items():
-                snake_key = to_snake_case(k)
-                # Si el campo es un array y viene como NULL, convertir a array vacío
-                if snake_key in array_fields and v is None:
-                    new_item[snake_key] = []
-                else:
-                    new_item[snake_key] = v
-            f.write(json.dumps(new_item) + '\n')
-
-def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
-    storage_client = storage.Client(project=project_id)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(dest_blob_name)
-    blob.upload_from_filename(local_file)
-    print(f"📤 Subido a gs://{bucket_name}/{dest_blob_name}")
 
 def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, table_final):
     """Detecta si hay cambios reales entre staging y tabla final"""
@@ -267,7 +83,10 @@ def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, tab
 def process_company(row):
     company_id = row.company_id
     company_name = row.company_name
-    project_id = "pph-inbox"  # Proyecto fijo para INBOX
+    # Cada compañía INBOX tiene su propio proyecto temporal (Estrategia A)
+    project_id = row.company_project_id
+    if not project_id:
+        raise ValueError(f"company_project_id vacío para company_id={company_id}. Primero crea el proyecto INBOX por compañía.")
     
     # Log de inicio de procesamiento de compañía
     log_event_bq(
@@ -747,14 +566,14 @@ def main():
         event_message="Iniciando proceso ETL de ServiceTitan para compañía INBOX"
     )
     
-    # INBOX: Trabaja con una sola compañía, no necesita iterar sobre companies
-    print("Conectando a BigQuery para obtener compañía INBOX...")
-    client = bigquery.Client(project=PROJECT_SOURCE)
+    # INBOX (multi-compañía): itera todas las compañías activas en pph-inbox.settings.companies
+    print("Conectando a BigQuery para obtener compañías INBOX...")
+    client = bigquery.Client(project=PROJECT_ID_FOR_QUERY)
     query = f'''
-        SELECT * FROM `{PROJECT_SOURCE}.{DATASET_NAME}.{TABLE_NAME}`
+        SELECT * FROM `{PROJECT_ID_FOR_QUERY}.{DATASET_NAME}.{TABLE_NAME}`
         WHERE company_bigquery_status = TRUE
+          AND company_project_id IS NOT NULL
         ORDER BY company_id
-        LIMIT 1
     '''
     results = list(client.query(query).result())
     
@@ -762,36 +581,41 @@ def main():
         log_event_bq(
             event_type="ERROR",
             event_title="No se encontró compañía INBOX",
-            event_message="No se encontró ninguna compañía INBOX activa en la tabla companies."
+            event_message="No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id)."
         )
-        print("❌ No se encontró ninguna compañía INBOX activa en la tabla companies.")
+        print("❌ No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id).")
         return
     
-    # Procesar la única compañía INBOX
-    row = results[0]
-    try:
-        process_company(row)
-        
-        # Log de fin del proceso ETL
-        log_event_bq(
-            event_type="SUCCESS",
-            event_title="Fin proceso ETL",
-            event_message="Proceso ETL completado exitosamente para compañía INBOX."
-        )
-        
+    total = len(results)
+    print(f"📊 Se encontraron {total} compañía(s) INBOX activa(s) para procesar\n")
+
+    failed = 0
+    for idx, row in enumerate(results, 1):
+        try:
+            print(f"📊 Procesando compañía {idx} de {total}")
+            process_company(row)
+        except Exception as e:
+            failed += 1
+            log_event_bq(
+                company_id=row.company_id,
+                company_name=row.company_name,
+                project_id=row.company_project_id,
+                event_type="ERROR",
+                event_title="Error procesando compañía",
+                event_message=f"Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}"
+            )
+            print(f"❌ Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}")
+
         print(f"\n{'='*80}")
-        print(f"🏁 Procesamiento INBOX completado exitosamente.")
-    except Exception as e:
-        log_event_bq(
-            company_id=row.company_id,
-            company_name=row.company_name,
-            project_id="pph-inbox",
-            event_type="ERROR",
-            event_title="Error procesando compañía",
-            event_message=f"Error procesando compañía INBOX {row.company_name}: {str(e)}"
-        )
-        print(f"❌ Error procesando compañía INBOX {row.company_name}: {str(e)}")
-        raise
+
+    # Log de fin del proceso ETL
+    log_event_bq(
+        event_type="SUCCESS" if failed == 0 else "WARNING",
+        event_title="Fin proceso ETL",
+        event_message=f"Proceso ETL INBOX finalizado. Total: {total}, fallidas: {failed}."
+    )
+
+    print(f"🏁 Procesamiento INBOX completado. Total: {total}, fallidas: {failed}.")
 
 if __name__ == "__main__":
     main()

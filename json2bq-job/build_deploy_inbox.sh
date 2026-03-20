@@ -39,8 +39,8 @@ echo "   Schedule: ${SCHEDULE_CRON} (cada 6 horas)"
 echo ""
 
 # Verificar que estamos en el directorio correcto
-if [ ! -f "servicetitan_inbox_json_to_bigquery.py" ]; then
-    echo "❌ Error: servicetitan_inbox_json_to_bigquery.py no encontrado."
+if [ ! -f "servicetitan_inbox_json_to_bq.py" ]; then
+    echo "❌ Error: servicetitan_inbox_json_to_bq.py no encontrado."
     echo "   Ejecuta este script desde el directorio json2bq-job/"
     exit 1
 fi
@@ -106,7 +106,8 @@ if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_I
         --memory ${MEMORY} \
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT}
+        --task-timeout ${TASK_TIMEOUT} \
+        --update-env-vars GCP_PROJECT=${PROJECT_ID}
 else
     echo "📝 Job no existe. Creando nuevo job..."
     gcloud run jobs create ${JOB_NAME} \
@@ -117,7 +118,8 @@ else
         --memory ${MEMORY} \
         --cpu ${CPU} \
         --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT}
+        --task-timeout ${TASK_TIMEOUT} \
+        --set-env-vars GCP_PROJECT=${PROJECT_ID}
 fi
 
 if [ $? -eq 0 ]; then
@@ -186,7 +188,7 @@ echo ""
 echo "📝 Notas:"
 echo "   - Este job procesa compañías INBOX desde la tabla companies_inbox"
 echo "   - Los datos se cargan en BigQuery del proyecto pph-inbox"
-echo "   - Script: servicetitan_inbox_json_to_bigquery.py"
+echo "   - Script: servicetitan_inbox_json_to_bq.py"
 echo "   - Ejecución automática: cada 6 horas (${SCHEDULE_CRON})"
 echo "   - Recursos reducidos: ${MEMORY} memoria, ${CPU} CPU (una compañía nueva con pocos registros)"
 echo ""

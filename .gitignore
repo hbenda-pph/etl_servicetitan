@@ -25,6 +25,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Backups
+*.old
+
 # Temporary files
 *.tmp
 *.temp
