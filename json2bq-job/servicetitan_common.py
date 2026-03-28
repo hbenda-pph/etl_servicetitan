@@ -291,13 +291,22 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     
     # Si es un diccionario/objeto (STRUCT)
     if isinstance(value, dict):
-        # Verificar si este campo debería ser un array (por nombre común)
-        # serialNumbers debería ser array
+        # Verificar si este campo debería ser un array (por nombre común o por known_array_fields)
         field_name_lower = field_path.lower() if field_path else ""
-        if 'serial' in field_name_lower and 'number' in field_name_lower:
-            # Si es un objeto pero debería ser array, convertir a array vacío
-            return []
+        snake_path = to_snake_case(field_path) if field_path else ""
         
+        # 1. Regla hardcodeada (serialNumbers)
+        if 'serial' in field_name_lower and 'number' in field_name_lower:
+            return []
+            
+        # 2. Regla dinámica: si está explícitamente en known_array_fields,
+        # significa que BQ esperaba un array (o un field simple) pero vino como objeto {}
+        if known_array_fields and snake_path in known_array_fields:
+            if not value:
+                return []
+            else:
+                return [value]  # Fallback a un array de este objeto si no está vacío
+
         # PRINCIPIO BRONZE: Preservar nombres originales (camelCase) - NO convertir a snake_case
         # Solo procesar recursivamente para corregir NULLs y arrays anidados
         fixed_dict = {}
@@ -308,11 +317,15 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
             
             # Verificar si este campo anidado necesita procesamiento especial
             nested_field_lower = nested_path.lower()
+            nested_snake = to_snake_case(k)
             
             # Procesar recursivamente para corregir NULLs y arrays, pero preservar nombres
             if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
                 # serialNumbers como objeto: convertir a array vacío
                 fixed_dict[k] = []  # Preservar nombre original
+            elif known_array_fields and nested_snake in known_array_fields and isinstance(v, dict):
+                # Campo problemático (ej: skills) como objeto: convertir a array vacío o [v]
+                fixed_dict[k] = [] if not v else [fix_nested_value(v, nested_path, known_array_fields)]
             else:
                 # Procesar recursivamente pero preservar nombre original
                 fixed_dict[k] = fix_nested_value(v, nested_path, known_array_fields)
@@ -1268,16 +1281,32 @@ def load_json_to_staging_with_error_handling(
                     error_trace = traceback.format_exc()
                     print(f"❌ Error completo en corrección de esquema:\n{error_trace}")
                     return (False, 0, f"Error corrigiendo esquema: {str(schema_error)}")
-            elif fix_type == 'repeated':
-                # Campo REPEATED con NULL: re-transformar datos
-                print(f"🧹 Re-transformando datos para limpiar NULLs en campo REPEATED {problematic_field}...")
-                # Esta lógica ya está en fix_json_format, solo necesitamos re-ejecutarla
-                # Por ahora, retornar error para que se maneje en el nivel superior
-                return (False, 0, f"Campo REPEATED {problematic_field} tiene valores NULL. Se requiere limpieza de datos.")
-            elif fix_type == 'nested':
-                # Campo anidado incorrecto: re-transformar datos
-                print(f"🧹 Re-transformando datos para corregir campo anidado {problematic_field}...")
-                return (False, 0, f"Campo anidado {problematic_field} tiene tipo incorrecto. Se requiere limpieza de datos.")
+            elif fix_type in ['repeated', 'nested']:
+                # Campo REPEATED con NULL o Campo anidado incorrecto: re-transformar datos
+                print(f"🧹 Re-transformando datos para corregir campo {problematic_field}...")
+                try:
+                    # Re-ejecutar fix_json_format pasando el campo fallido para que sea convertido a [] si es necesario
+                    fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
+                    
+                    # Limpiar tabla en caso de que existiera parcialmente
+                    bq_client.delete_table(table_ref_staging, not_found_ok=True)
+                    
+                    print(f"🔄 Reintentando carga a staging después de corregir datos...")
+                    with open(temp_fixed, "rb") as f2:
+                        retry_job = bq_client.load_table_from_file(
+                            f2,
+                            table_ref_staging,
+                            job_config=job_config
+                        )
+                    retry_job.result()
+                    
+                    load_time = time.time() - load_start
+                    print(f"✅ Cargado a tabla staging exitosamente después de limpieza de datos")
+                    return (True, load_time, None)
+                except Exception as retry_error:
+                    error_msg = f"Error reintentando carga tras limpieza de datos para {problematic_field}: {str(retry_error)}"
+                    print(f"❌ {error_msg}")
+                    return (False, 0, error_msg)
         
         # Si no se pudo corregir, retornar error
         load_time = time.time() - load_start
