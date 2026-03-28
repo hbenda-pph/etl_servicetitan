@@ -398,9 +398,6 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
         # Mostrar progreso cada 1000 items o cada 5 segundos
         current_time = time.time()
         if (items_processed % 1000 == 0) or (current_time - last_progress >= 5):
-            elapsed = current_time - start_transform
-            rate = items_processed / elapsed if elapsed > 0 else 0
-            print(f"  📊 {items_processed:,}/{total_items:,} items ({rate:.0f} items/seg)")
             last_progress = current_time
     
     # Escribir como newline-delimited JSON
@@ -550,12 +547,9 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             # Resetear contador de intentos después de parsear exitosamente
                             parse_attempts = 0
                             
-                            # Mostrar progreso cada 10 segundos O cada 1000 items (lo que ocurra primero)
+                            # Actualizar contadores de progreso sin imprimir para evitar logs excesivos
                             current_time = time.time()
                             if (current_time - last_progress_time >= 10) or (items_since_last_progress >= 1000):
-                                elapsed = current_time - start_time
-                                rate = items_processed / elapsed if elapsed > 0 else 0
-                                print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
                                 last_progress_time = current_time
                                 items_since_last_progress = 0
                         except (ValueError, json.JSONDecodeError) as e:
@@ -604,12 +598,9 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                             items_processed += 1
                             
-                            # Mostrar progreso cada 10 segundos
+                            # Actualizar contadores de progreso sin imprimir para evitar logs excesivos
                             current_time = time.time()
                             if current_time - last_progress_time >= 10:
-                                elapsed = current_time - start_time
-                                rate = items_processed / elapsed if elapsed > 0 else 0
-                                print(f"🔄 Procesando... {items_processed:,} items ({rate:.0f} items/seg)")
                                 last_progress_time = current_time
                         except Exception as e:
                             # Log error pero continuar
