@@ -335,8 +335,18 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     # Si es una lista (ARRAY), procesar cada elemento recursivamente
     # IMPORTANTE: Cuando el array contiene STRUCT, preserva camelCase dentro de esos STRUCT
     if isinstance(value, list):
-        # Procesar recursivamente cada elemento del array (preserva camelCase dentro de STRUCT)
-        return [fix_nested_value(item, field_path, known_array_fields) for item in value]
+        processed_list = []
+        for item in value:
+            # BigQuery no soporta arrays anidados (ARRAY de ARRAYs).
+            # Si detectamos un array dentro de este array, lo convertimos a string o lo omitimos si está vacío
+            if isinstance(item, list):
+                if not item:
+                    continue  # Omitir arrays anidados vacíos (ej: [[]])
+                import json as _json
+                processed_list.append(_json.dumps(item))
+            else:
+                processed_list.append(fix_nested_value(item, field_path, known_array_fields))
+        return processed_list
     
     # Para otros tipos, retornar tal cual
     return value
