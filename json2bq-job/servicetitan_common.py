@@ -969,24 +969,24 @@ def load_json_to_staging_with_error_handling(
                 job_config=job_config
             )
         load_job.result()
-        load_time = time.time() - load_start
-        return (True, load_time, None)
     except Exception as e:
-        error_msg = str(e)
+        import re
+        error_msg_raw = str(e)
+        error_msg = error_msg_raw
         problematic_field = None
         needs_fix = False
         fix_type = None  # 'repeated', 'nested', 'type_mismatch'
         
+        # Limpiar verbosidad de BigQuery para los logs
+        clean_errors = []
+        
         # Intentar obtener errores detallados del job de BigQuery
-        # El mensaje de excepción puede ser genérico, pero el job tiene errores detallados
         detailed_errors = []
         if load_job:
             try:
-                # Obtener errores del job (el job ya terminó con error)
                 if hasattr(load_job, 'errors') and load_job.errors:
                     detailed_errors = load_job.errors
                 elif hasattr(load_job, 'job_id'):
-                    # Obtener el job completo para acceder a los errores
                     try:
                         job = bq_client.get_job(load_job.job_id)
                         if hasattr(job, 'errors') and job.errors:
@@ -996,23 +996,51 @@ def load_json_to_staging_with_error_handling(
             except:
                 pass
         
-        # Construir mensaje de error más detallado
+        # Analizar cada error y construir mensajes limpios
+        pos_match = None
         if detailed_errors:
-            error_details = []
             for err in detailed_errors:
                 err_msg = err.get('message', '') if isinstance(err, dict) else str(err)
-                error_details.append(err_msg)
+                
+                # Omitir errores redudantes y no descriptivos
+                if "encountered too many errors, giving up" in err_msg:
+                    continue
+                
+                # Extraer posición de bytes si está disponible ("row starting at position X")
+                if not pos_match:
+                    pos_match = re.search(r'position\s+(\d+)', err_msg, re.IGNORECASE)
+                
                 # Extraer campo del mensaje detallado si está disponible
                 if 'Field:' in err_msg and not problematic_field:
                     field_match = re.search(r'Field:\s*([\w_]+)', err_msg, re.IGNORECASE)
                     if field_match:
                         problematic_field = field_match.group(1)
-            
-            # Agregar detalles al mensaje de error y mostrarlo
-            if error_details:
-                detailed_msg = "\n".join([f"  • {detail}" for detail in error_details[:5]])
-                print(f"❌ Error detallado de BigQuery:\n{detailed_msg}")
-                error_msg = f"{error_msg}\n\n📋 Detalles del error:\n{detailed_msg}"
+                
+                if err_msg not in clean_errors:
+                    clean_errors.append(err_msg)
+        
+        # Manejo especial: extraer la fila exacta JSON usando la posición de bytes
+        problematic_row_preview = ""
+        if pos_match:
+            try:
+                byte_pos = int(pos_match.group(1))
+                with open(temp_fixed, 'rb') as f_preview:
+                    f_preview.seek(byte_pos)
+                    # Leer la línea en esa posición
+                    bad_line = f_preview.readline().decode('utf-8', errors='replace').strip()
+                    if bad_line:
+                        # Truncar a 200 caracteres para evitar spam excesivo
+                        preview_str = bad_line[:200] + "..." if len(bad_line) > 200 else bad_line
+                        problematic_row_preview = f"\n  ▶️ Fila JSON problemática (aprox): {preview_str}"
+            except Exception:
+                pass
+
+        # Construir mensaje de error más limpio
+        if clean_errors:
+            error_msg = "\n".join([f"  • {msg}" for msg in clean_errors])
+            # Imprimir al usuario de manera limpia
+            print(f"❌ Error de BigQuery detectado:")
+            print(f"{error_msg}{problematic_row_preview}")
         
         # Intentar extraer campo REPEATED del mensaje de error
         # Formato 1: "Field: permissions; Value: NULL"
