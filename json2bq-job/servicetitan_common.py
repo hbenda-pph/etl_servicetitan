@@ -1333,11 +1333,21 @@ def load_json_to_staging_with_error_handling(
                     bq_client.delete_table(table_ref_staging, not_found_ok=True)
                     
                     print(f"🔄 Reintentando carga a staging después de corregir datos...")
+                    
+                    # CRÍTICO: Usar un nuevo job_config con autodetect=True. 
+                    # El antiguo job_config podría tener un 'schema' estático (calculado antes
+                    # de hacer el stringify) que entra en conflicto con nuestro nuevo formato texto.
+                    retry_config = bigquery.LoadJobConfig(
+                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                        autodetect=True,
+                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+                    )
+                    
                     with open(temp_fixed, "rb") as f2:
                         retry_job = bq_client.load_table_from_file(
                             f2,
                             table_ref_staging,
-                            job_config=job_config
+                            job_config=retry_config
                         )
                     retry_job.result()
                     
