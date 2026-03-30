@@ -1404,7 +1404,31 @@ def execute_merge_or_insert(
     # Obtener nombres de columnas (excluyendo campos ETL y id)
     staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
     final_cols = {col.name for col in final_schema if col.name != 'id' and not col.name.startswith('_etl_')}
-    common_cols = staging_cols.intersection(final_cols)
+    new_cols = staging_cols - final_cols  # Columnas nuevas en staging que no están en final
+    
+    # Si hay columnas nuevas, agregarlas al esquema de la tabla final usando ALTER TABLE
+    if new_cols:
+        try:
+            print(f"🆕 Columnas nuevas detectadas: {sorted(new_cols)}. Agregando al esquema de tabla final...")
+            # Obtener esquema completo de staging (sin campos ETL)
+            new_schema_fields = [col for col in staging_schema if col.name in new_cols]
+            
+            # Agregar cada nueva columna usando ALTER TABLE
+            # BigQuery requiere una sentencia ALTER TABLE por columna (secuencial)
+            # Esto evita el bug de BigQuery donde update_table borra campos anidados
+            for new_field in new_schema_fields:
+                try:
+                    field_def = _schema_field_to_sql(new_field)
+                    alter_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {field_def}"
+                    query_job = bq_client.query(alter_sql)
+                    query_job.result()
+                    print(f"  ✅ Columna {new_field.name} agregada al esquema")
+                except Exception as e:
+                    print(f"  ⚠️  No se pudo agregar {new_field.name} con ALTER TABLE: {str(e)}")
+                    print(f"  ⚠️  Continuando sin agregar esta columna. El MERGE manejará cualquier problema de esquema.")
+            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)}")
+        except Exception as schema_error:
+            print(f"⚠️  Error al actualizar esquema: {str(schema_error)}")
     
     # Verificar si la tabla final está vacía (primera carga)
     is_first_load = final_table.num_rows == 0
@@ -1413,12 +1437,11 @@ def execute_merge_or_insert(
         # Primera carga: usar INSERT directo (más eficiente y evita problemas de MERGE)
         print(f"📥 Primera carga detectada (tabla vacía). Usando INSERT directo en lugar de MERGE...")
         
-        # Para INSERT, usar solo columnas comunes + campos ETL para evitar error "Name no found inside T"
-        # Incluir explícitamente el 'id'
-        common_cols_list = ['id'] + sorted(list(common_cols))
+        # Para INSERT, usar todas las columnas de staging explícitamente + 'id'
+        cols_list = ['id'] + sorted(list(staging_cols))
         
-        insert_cols_with_etl = common_cols_list + ['_etl_synced', '_etl_operation']
-        insert_values_with_etl = [f'S.{col}' for col in common_cols_list] + ['CURRENT_TIMESTAMP()', "'INSERT'"]
+        insert_cols_with_etl = cols_list + ['_etl_synced', '_etl_operation']
+        insert_values_with_etl = [f'S.{col}' for col in cols_list] + ['CURRENT_TIMESTAMP()', "'INSERT'"]
         
         insert_sql = f'''
             INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
@@ -1459,13 +1482,13 @@ def execute_merge_or_insert(
         # Tabla tiene datos: usar MERGE incremental
         print(f"🔄 Tabla tiene datos. Usando MERGE incremental...")
         
-        # Construir UPDATE SET solo con columnas comunes (intersección real)
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(common_cols)])
+        # Construir UPDATE SET con todas las columnas de staging (ahora que agregamos las nuevas)
+        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
         
-        # Para INSERT, usar solo columnas comunes + el id
-        common_cols_list = ['id'] + sorted(list(common_cols))
-        insert_cols = common_cols_list
-        insert_values = [f'S.{col}' for col in common_cols_list]
+        # Para INSERT, usar todas las columnas de staging + el id
+        cols_list = ['id'] + sorted(list(staging_cols))
+        insert_cols = cols_list
+        insert_values = [f'S.{col}' for col in cols_list]
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''

@@ -185,88 +185,31 @@ def process_company(row):
             bq_client.create_dataset(dataset)
             print(f"🆕 Dataset {dataset_staging} creado en proyecto {project_id}")
         
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            autodetect=True,
-            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+        # Usar la función común de carga que contiene todas las correcciones heurísticas 
+        # y generación de vistas previas de errores JSON para logs
+        success, load_time, error_msg = load_json_to_staging_with_error_handling(
+            bq_client=bq_client,
+            temp_fixed=temp_fixed,
+            temp_json=temp_json,
+            table_ref_staging=table_ref_staging,
+            project_id=project_id,
+            table_name=table_name,
+            table_staging=table_staging,
+            dataset_staging=dataset_staging,
+            load_start=load_start,
+            log_event_callback=log_event_bq_inbox,
+            company_id=company_id,
+            company_name=company_name,
+            endpoint_name=endpoint_name
         )
         
-        # Intentar cargar directamente
-        try:
-            load_job = bq_client.load_table_from_file(
-                open(temp_fixed, "rb"),
-                table_ref_staging,
-                job_config=job_config
-            )
-            load_job.result()
-            print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging}")
-            
-            # log_event_bq( [COMENTADO]
-            #     company_id=company_id,
-            #     company_name=company_name,
-            #     project_id=project_id,
-            #     endpoint=endpoint_name,
-            #     event_type="SUCCESS",
-            #     event_title="Carga a staging exitosa",
-            #     event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging}"
-            # )
-        except Exception as e:
-            error_msg = str(e)
-            # Intentar extraer campo REPEATED del mensaje de error
-            # Formato: "Field: permissions; Value: NULL" (puede estar en cualquier parte del mensaje)
-            match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
-            
-            if match:
-                problematic_field = match.group(1)
-                print(f"🔍 Campo REPEATED detectado del error: {problematic_field}")
-                print(f"🧹 Limpiando datos: convirtiendo NULL a [] para campo {problematic_field}")
-                
-                # Limpiar datos con el campo detectado
-                fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
-                
-                # Reintentar carga
-                try:
-                    load_job = bq_client.load_table_from_file(
-                        open(temp_fixed, "rb"),
-                        table_ref_staging,
-                        job_config=job_config
-                    )
-                    load_job.result()
-                    print(f"✅ Cargado a tabla staging: {dataset_staging}.{table_staging} (después de limpieza)")
-                    
-                    # log_event_bq( [COMENTADO]
-                    #     company_id=company_id,
-                    #     company_name=company_name,
-                    #     project_id=project_id,
-                    #     endpoint=endpoint_name,
-                    #     event_type="SUCCESS",
-                    #     event_title="Carga a staging exitosa (después de limpieza)",
-                    #     event_message=f"Archivo cargado exitosamente a {dataset_staging}.{table_staging} después de limpiar campo {problematic_field}"
-                    # )
-                except Exception as retry_error:
-                    # log_event_bq( [COMENTADO]
-                    #     company_id=company_id,
-                    #     company_name=company_name,
-                    #     project_id=project_id,
-                    #     endpoint=endpoint_name,
-                    #     event_type="ERROR",
-                    #     event_title="Error cargando a staging (después de limpieza)",
-                    #     event_message=f"Error cargando a tabla staging después de limpiar {problematic_field}: {str(retry_error)}"
-                    # )
-                    print(f"❌ Error cargando a tabla staging después de limpieza: {str(retry_error)}")
-                    continue
-            else:
-                # log_event_bq( [COMENTADO]
-                #     company_id=company_id,
-                #     company_name=company_name,
-                #     project_id=project_id,
-                #     endpoint=endpoint_name,
-                #     event_type="ERROR",
-                #     event_title="Error cargando a staging",
-                #     event_message=f"Error cargando a tabla staging: {error_msg}"
-                # )
-                print(f"❌ Error cargando a tabla staging: {error_msg}")
-                continue
+        if not success:
+            print(f"❌ Error cargando a tabla staging: {error_msg}")
+            merge_time = 0.0
+            print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            continue
         
         # Asegurar que la tabla final existe
         try:
@@ -295,250 +238,50 @@ def process_company(row):
             #     event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente con campos ETL"
             # )
         
-        # MERGE incremental a tabla final con Soft Delete y campos ETL
-        # Obtener esquemas de ambas tablas
-        staging_schema = bq_client.get_table(table_ref_staging).schema
-        final_schema = bq_client.get_table(table_ref_final).schema
+        # MERGE/INSERT (usando función común ahora potenciada)
+        merge_start = time.time()
+        staging_table = bq_client.get_table(table_ref_staging)
+        final_table = bq_client.get_table(table_ref_final)
         
-        # Obtener nombres de columnas (excluyendo campos ETL y id)
-        staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
-        final_cols = {col.name for col in final_schema if col.name != 'id' and not col.name.startswith('_etl_')}
-        common_cols = staging_cols & final_cols  # Intersección: columnas en ambas tablas
-        new_cols = staging_cols - final_cols  # Columnas nuevas en staging que no están en final
+        # Verificar y corregir incompatibilidades de esquema (tipos incompatibles)
+        print(f"🔍 Verificando compatibilidad de esquemas entre staging y final...")
+        needs_correction, corrections_made, alignment_error = align_schemas_before_merge(
+            bq_client=bq_client,
+            staging_table=staging_table,
+            final_table=final_table,
+            project_id=project_id,
+            dataset_final=dataset_final,
+            table_final=table_final
+        )
         
-        # Si hay columnas nuevas, agregarlas al esquema de la tabla final
-        if new_cols:
-            print(f"🆕 Columnas nuevas detectadas: {sorted(new_cols)}. Actualizando esquema de tabla final...")
-            # Obtener esquema completo de staging (sin campos ETL)
-            new_schema_fields = [col for col in staging_schema if col.name in new_cols]
+        if alignment_error:
+            print(f"❌ Error alineando esquemas: {alignment_error}")
+            
+        if needs_correction:
             final_table = bq_client.get_table(table_ref_final)
             
-            # Separar campos ETL del resto del esquema para mantenerlos al final
-            etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
-            non_etl_fields = [col for col in final_table.schema if not col.name.startswith('_etl_')]
-            
-            # Reconstruir esquema: campos normales + nuevas columnas + campos ETL
-            final_table.schema = non_etl_fields + new_schema_fields + etl_fields
-            bq_client.update_table(final_table, ['schema'])
-            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)} (campos ETL mantenidos al final)")
+        # Usar función común para ejecutar MERGE o INSERT con Schema Evolution supercargado
+        merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
+            bq_client=bq_client,
+            staging_table=staging_table,
+            final_table=final_table,
+            project_id=project_id,
+            dataset_final=dataset_final,
+            table_final=table_final,
+            dataset_staging=dataset_staging,
+            table_staging=table_staging,
+            merge_start=merge_start,
+            log_event_callback=None, # INBOX usa logs comentados actualmente
+            company_id=company_id,
+            company_name=company_name,
+            endpoint_name=endpoint_name
+        )
         
-        # Construir UPDATE SET solo con columnas comunes (ahora incluye las nuevas)
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
-        
-        # Para INSERT, usar todas las columnas de staging (excepto ETL)
-        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
-        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
-        
-        merge_sql = f'''
-            MERGE `{project_id}.{dataset_final}.{table_final}` T
-            USING `{project_id}.{dataset_staging}.{table_staging}` S
-            ON T.id = S.id
-            WHEN MATCHED THEN UPDATE SET 
-                {update_set},
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'UPDATE'
-            WHEN NOT MATCHED THEN INSERT (
-                {', '.join(insert_cols)},
-                _etl_synced, _etl_operation
-            ) VALUES (
-                {', '.join(insert_values)},
-                CURRENT_TIMESTAMP(), 'INSERT'
-            )
-            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'DELETE'
-        '''
-        
-        try:
-            query_job = bq_client.query(merge_sql)
-            query_job.result()
-            print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
-            
-            # Borrar tabla staging
+        if merge_success:
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
             print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
-            
-            # log_event_bq( [COMENTADO]
-            #     company_id=company_id,
-            #     company_name=company_name,
-            #     project_id=project_id,
-            #     endpoint=endpoint_name,
-            #     event_type="SUCCESS",
-            #     event_title="MERGE exitoso",
-            #     event_message=f"MERGE con Soft Delete ejecutado exitosamente y tabla staging eliminada"
-            # )
-        except Exception as e:
-            error_msg = str(e)
-            # Detectar error de incompatibilidad de STRUCT
-            # Formato: "Value of type STRUCT<...> cannot be assigned to T.address, which has type STRUCT<...>"
-            struct_match = re.search(r'cannot be assigned to T\.(\w+), which has type STRUCT', error_msg)
-            
-            # Detectar error de cambio de tipo de campo (INT64 vs STRING, etc.)
-            # Formato: "Value of type INT64 cannot be assigned to T.purchase_order_id, which has type STRING"
-            type_mismatch = re.search(r'Value of type (\w+) cannot be assigned to T\.(\w+), which has type (\w+)', error_msg)
-            
-            if struct_match:
-                problematic_struct_field = struct_match.group(1)
-                print(f"🔍 Campo STRUCT con esquema incompatible detectado: {problematic_struct_field}")
-                print(f"🔧 Actualizando esquema de campo STRUCT {problematic_struct_field} en tabla final...")
-                
-                # Obtener el campo STRUCT actualizado de staging
-                staging_table = bq_client.get_table(table_ref_staging)
-                final_table = bq_client.get_table(table_ref_final)
-                
-                # Encontrar el campo en staging
-                new_struct_field = None
-                for field in staging_table.schema:
-                    if field.name == problematic_struct_field:
-                        new_struct_field = field
-                        break
-                
-                if new_struct_field:
-                    # Reemplazar el campo en el esquema final
-                    updated_schema = []
-                    for field in final_table.schema:
-                        if field.name == problematic_struct_field:
-                            updated_schema.append(new_struct_field)
-                        elif not field.name.startswith('_etl_'):
-                            updated_schema.append(field)
-                    
-                    # Mantener campos ETL al final
-                    etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
-                    final_table.schema = updated_schema + etl_fields
-                    bq_client.update_table(final_table, ['schema'])
-                    print(f"✅ Esquema de campo STRUCT {problematic_struct_field} actualizado.")
-                    
-                    # Reintentar MERGE
-                    try:
-                        query_job = bq_client.query(merge_sql)
-                        query_job.result()
-                        print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
-                        
-                        bq_client.delete_table(table_ref_staging, not_found_ok=True)
-                        print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
-                        
-                        # log_event_bq( [COMENTADO]
-                        #     company_id=company_id,
-                        #     company_name=company_name,
-                        #     project_id=project_id,
-                        #     endpoint=endpoint_name,
-                        #     event_type="SUCCESS",
-                        #     event_title="MERGE exitoso (después de actualizar STRUCT)",
-                        #     event_message=f"MERGE ejecutado exitosamente después de actualizar esquema de {problematic_struct_field}"
-                        # )
-                    except Exception as retry_error:
-                        # log_event_bq( [COMENTADO]
-                        #     company_id=company_id,
-                        #     company_name=company_name,
-                        #     project_id=project_id,
-                        #     endpoint=endpoint_name,
-                        #     event_type="ERROR",
-                        #     event_title="Error en MERGE (después de actualizar STRUCT)",
-                        #     event_message=f"Error en MERGE después de actualizar {problematic_struct_field}: {str(retry_error)}",
-                        #     info={"merge_sql": merge_sql}
-                        # )
-                        print(f"❌ Error en MERGE después de actualizar STRUCT: {str(retry_error)}")
-                else:
-                    # log_event_bq( [COMENTADO]
-                    #     company_id=company_id,
-                    #     company_name=company_name,
-                    #     project_id=project_id,
-                    #     endpoint=endpoint_name,
-                    #     event_type="ERROR",
-                    #     event_title="Error en MERGE",
-                    #     event_message=f"Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging. {error_msg}",
-                    #     info={"merge_sql": merge_sql}
-                    # )
-                    print(f"❌ Error en MERGE: campo STRUCT {problematic_struct_field} no encontrado en staging")
-            elif type_mismatch:
-                # Campo cambió de tipo (ej: INT64 -> STRING)
-                new_type = type_mismatch.group(1)
-                problematic_field = type_mismatch.group(2)
-                old_type = type_mismatch.group(3)
-                
-                print(f"🔍 Campo con tipo incompatible detectado: {problematic_field} (staging: {new_type}, final: {old_type})")
-                print(f"🔧 Actualizando tipo de campo {problematic_field} en tabla final...")
-                
-                # Obtener el campo actualizado de staging
-                staging_table = bq_client.get_table(table_ref_staging)
-                final_table = bq_client.get_table(table_ref_final)
-                
-                # Encontrar el campo en staging
-                new_field = None
-                for field in staging_table.schema:
-                    if field.name == problematic_field:
-                        new_field = field
-                        break
-                
-                if new_field:
-                    # Reemplazar el campo en el esquema final
-                    updated_schema = []
-                    for field in final_table.schema:
-                        if field.name == problematic_field:
-                            updated_schema.append(new_field)
-                        elif not field.name.startswith('_etl_'):
-                            updated_schema.append(field)
-                    
-                    # Mantener campos ETL al final
-                    etl_fields = [col for col in final_table.schema if col.name.startswith('_etl_')]
-                    final_table.schema = updated_schema + etl_fields
-                    bq_client.update_table(final_table, ['schema'])
-                    print(f"✅ Tipo de campo {problematic_field} actualizado de {old_type} a {new_type}.")
-                    
-                    # Reintentar MERGE
-                    try:
-                        query_job = bq_client.query(merge_sql)
-                        query_job.result()
-                        print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado.")
-                        
-                        bq_client.delete_table(table_ref_staging, not_found_ok=True)
-                        print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
-                        
-                        # log_event_bq( [COMENTADO]
-                        #     company_id=company_id,
-                        #     company_name=company_name,
-                        #     project_id=project_id,
-                        #     endpoint=endpoint_name,
-                        #     event_type="SUCCESS",
-                        #     event_title="MERGE exitoso (después de actualizar tipo)",
-                        #     event_message=f"MERGE ejecutado exitosamente después de actualizar tipo de {problematic_field} de {old_type} a {new_type}"
-                        # )
-                    except Exception as retry_error:
-                        # log_event_bq( [COMENTADO]
-                        #     company_id=company_id,
-                        #     company_name=company_name,
-                        #     project_id=project_id,
-                        #     endpoint=endpoint_name,
-                        #     event_type="ERROR",
-                        #     event_title="Error en MERGE (después de actualizar tipo)",
-                        #     event_message=f"Error en MERGE después de actualizar tipo de {problematic_field}: {str(retry_error)}",
-                        #     info={"merge_sql": merge_sql}
-                        # )
-                        print(f"❌ Error en MERGE después de actualizar tipo: {str(retry_error)}")
-                else:
-                    # log_event_bq( [COMENTADO]
-                    #     company_id=company_id,
-                    #     company_name=company_name,
-                    #     project_id=project_id,
-                    #     endpoint=endpoint_name,
-                    #     event_type="ERROR",
-                    #     event_title="Error en MERGE",
-                    #     event_message=f"Error en MERGE: campo {problematic_field} no encontrado en staging. {error_msg}",
-                    #     info={"merge_sql": merge_sql}
-                    # )
-                    print(f"❌ Error en MERGE: campo {problematic_field} no encontrado en staging")
-            else:
-                # log_event_bq( [COMENTADO]
-                #     company_id=company_id,
-                #     company_name=company_name,
-                #     project_id=project_id,
-                #     endpoint=endpoint_name,
-                #     event_type="ERROR",
-                #     event_title="Error en MERGE",
-                #     event_message=f"Error en MERGE o borrado de staging: {error_msg}. La tabla staging NO se borra para depuración.",
-                #     info={"merge_sql": merge_sql}
-                # )
-                print(f"❌ Error en MERGE o borrado de staging: {error_msg} (la tabla staging NO se borra para depuración)")
+        else:
+            print(f"❌ Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
         
         # Borrar archivos temporales
         try:
