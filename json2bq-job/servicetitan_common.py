@@ -1403,6 +1403,8 @@ def execute_merge_or_insert(
     
     # Obtener nombres de columnas (excluyendo campos ETL y id)
     staging_cols = {col.name for col in staging_schema if col.name != 'id' and not col.name.startswith('_etl_')}
+    final_cols = {col.name for col in final_schema if col.name != 'id' and not col.name.startswith('_etl_')}
+    common_cols = staging_cols.intersection(final_cols)
     
     # Verificar si la tabla final está vacía (primera carga)
     is_first_load = final_table.num_rows == 0
@@ -1411,11 +1413,12 @@ def execute_merge_or_insert(
         # Primera carga: usar INSERT directo (más eficiente y evita problemas de MERGE)
         print(f"📥 Primera carga detectada (tabla vacía). Usando INSERT directo en lugar de MERGE...")
         
-        # Para INSERT, usar todas las columnas de staging (excepto ETL) + campos ETL
-        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
-        insert_cols_with_etl = insert_cols + ['_etl_synced', '_etl_operation']
-        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
-        insert_values_with_etl = insert_values + ['CURRENT_TIMESTAMP()', "'INSERT'"]
+        # Para INSERT, usar solo columnas comunes + campos ETL para evitar error "Name no found inside T"
+        # Incluir explícitamente el 'id'
+        common_cols_list = ['id'] + sorted(list(common_cols))
+        
+        insert_cols_with_etl = common_cols_list + ['_etl_synced', '_etl_operation']
+        insert_values_with_etl = [f'S.{col}' for col in common_cols_list] + ['CURRENT_TIMESTAMP()', "'INSERT'"]
         
         insert_sql = f'''
             INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
@@ -1456,12 +1459,13 @@ def execute_merge_or_insert(
         # Tabla tiene datos: usar MERGE incremental
         print(f"🔄 Tabla tiene datos. Usando MERGE incremental...")
         
-        # Construir UPDATE SET solo con columnas comunes
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
+        # Construir UPDATE SET solo con columnas comunes (intersección real)
+        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(common_cols)])
         
-        # Para INSERT, usar todas las columnas de staging (excepto ETL)
-        insert_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
-        insert_values = [f'S.{col.name}' for col in staging_schema if not col.name.startswith('_etl_')]
+        # Para INSERT, usar solo columnas comunes + el id
+        common_cols_list = ['id'] + sorted(list(common_cols))
+        insert_cols = common_cols_list
+        insert_values = [f'S.{col}' for col in common_cols_list]
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''
