@@ -291,45 +291,28 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     
     # Si es un diccionario/objeto (STRUCT)
     if isinstance(value, dict):
-        # Verificar si este campo debería ser un array (por nombre común o por known_array_fields)
         field_name_lower = field_path.lower() if field_path else ""
         snake_path = to_snake_case(field_path) if field_path else ""
         
         # 1. Regla hardcodeada (serialNumbers)
         if 'serial' in field_name_lower and 'number' in field_name_lower:
             return []
+
+        # PRINCIPIO BRONZE: Preservar nombres originales (camelCase) - NO convertir a snake_case
+        # Procesar recursivamente para corregir NULLs y arrays, preservando nombres
+        fixed_dict = {}
+        for k, v in value.items():
+            nested_path = f"{field_path}.{k}" if field_path else k
+            fixed_dict[k] = fix_nested_value(v, nested_path, known_array_fields)
             
         # 2. Regla dinámica: si está explícitamente en known_array_fields,
         # significa que BQ esperaba un array (o un field simple) pero vino como objeto {}
         if known_array_fields and snake_path in known_array_fields:
-            if not value:
+            if not fixed_dict:
                 return []
             else:
-                return [value]  # Fallback a un array de este objeto si no está vacío
-
-        # PRINCIPIO BRONZE: Preservar nombres originales (camelCase) - NO convertir a snake_case
-        # Solo procesar recursivamente para corregir NULLs y arrays anidados
-        fixed_dict = {}
-        
-        for k, v in value.items():
-            # Preservar nombre original 'k' (camelCase) - NO convertir a snake_case
-            nested_path = f"{field_path}.{k}" if field_path else k
-            
-            # Verificar si este campo anidado necesita procesamiento especial
-            nested_field_lower = nested_path.lower()
-            nested_snake = to_snake_case(k)
-            
-            # Procesar recursivamente para corregir NULLs y arrays, pero preservar nombres
-            if 'serial' in nested_field_lower and 'number' in nested_field_lower and isinstance(v, dict):
-                # serialNumbers como objeto: convertir a array vacío
-                fixed_dict[k] = []  # Preservar nombre original
-            elif known_array_fields and nested_snake in known_array_fields and isinstance(v, dict):
-                # Campo problemático (ej: skills) como objeto: convertir a array vacío o [v]
-                fixed_dict[k] = [] if not v else [fix_nested_value(v, nested_path, known_array_fields)]
-            else:
-                # Procesar recursivamente pero preservar nombre original
-                fixed_dict[k] = fix_nested_value(v, nested_path, known_array_fields)
-        
+                return [fixed_dict]  # Fallback a un array de este objeto si no está vacío
+                
         return fixed_dict
     
     # Si es una lista (ARRAY), procesar cada elemento recursivamente
@@ -345,7 +328,10 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
                 import json as _json
                 processed_list.append(_json.dumps(item))
             else:
-                processed_list.append(fix_nested_value(item, field_path, known_array_fields))
+                # Agregar sufijo '[]' a la ruta para evitar que reglas de known_array_fields se activen
+                # doblemente en los elementos hijos del array y creen Array of Arrays
+                array_item_path = f"{field_path}[]" if field_path else "[]"
+                processed_list.append(fix_nested_value(item, array_item_path, known_array_fields))
         return processed_list
     
     # Para otros tipos, retornar tal cual
