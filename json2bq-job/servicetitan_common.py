@@ -337,11 +337,12 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     # Para otros tipos, retornar tal cual
     return value
 
-def fix_json_format(local_path, temp_path, repeated_fields=None):
+def fix_json_format(local_path, temp_path, repeated_fields=None, stringify_fields=None):
     """Transforma el JSON a formato newline-delimited y snake_case.
     IMPORTANTE: Campos de nivel superior → snake_case, campos dentro de STRUCT → camelCase (preservar fuente).
     Soporta tanto JSON array como newline-delimited JSON.
     Si se proporciona repeated_fields, convierte NULL a [] para esos campos.
+    Si se proporciona stringify_fields, convierte el contenido a un JSON string.
     También corrige campos anidados que deberían ser arrays pero vienen como objetos.
     
     Para archivos grandes (>100MB), usa procesamiento streaming para evitar problemas de memoria."""
@@ -355,7 +356,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
     # El parsing incremental con raw_decode puede atascarse en items problemáticos
     if file_size_mb > VERY_LARGE_FILE_THRESHOLD_MB:
         # Archivos >1GB: usar streaming (parsing incremental)
-        return fix_json_format_streaming(local_path, temp_path, repeated_fields)
+        return fix_json_format_streaming(local_path, temp_path, repeated_fields, stringify_fields)
     elif file_size_mb > LARGE_FILE_THRESHOLD_MB:
         # Archivos 100MB-1GB: cargar completo en memoria (más confiable)
         # 906MB es grande pero manejable en la mayoría de sistemas
@@ -403,7 +404,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
     last_progress = start_transform
     
     for item in json_data:
-        transformed_item = transform_item(item, repeated_fields)
+        transformed_item = transform_item(item, repeated_fields, stringify_fields)
         transformed_items.append(transformed_item)
         items_processed += 1
         
@@ -421,7 +422,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
     transform_time = time.time() - start_transform
     print(f"✅ Transformación completada: {len(transformed_items):,} items procesados en {transform_time:.1f}s ({len(transformed_items)/transform_time:.0f} items/seg)")
 
-def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
+def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, stringify_fields=None):
     """Versión streaming de fix_json_format para archivos grandes.
     Procesa línea por línea para evitar cargar todo en memoria.
     Usa json.JSONDecoder para parsear JSON arrays de forma incremental."""
@@ -597,7 +598,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                             # Hay datos sin procesar - intentar parsear uno más
                             try:
                                 obj, consumed = decoder.raw_decode(buffer_remaining.rstrip(',').rstrip(']').strip())
-                                transformed = transform_item(obj, repeated_fields)
+                                transformed = transform_item(obj, repeated_fields, stringify_fields)
                                 f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                                 items_processed += 1
                             except:
@@ -609,7 +610,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
                     if line.strip():
                         try:
                             item = json.loads(line)
-                            transformed = transform_item(item, repeated_fields)
+                            transformed = transform_item(item, repeated_fields, stringify_fields)
                             f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                             items_processed += 1
                             
@@ -629,7 +630,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
     else:
         print(f"✅ Transformación completada: {items_processed:,} items procesados en {total_time:.1f}s ({items_processed/total_time:.0f} items/seg)")
 
-def transform_item(item, array_fields):
+def transform_item(item, array_fields, stringify_fields=None):
     """Transforma un item individual a snake_case en nivel superior, preserva camelCase en STRUCT."""
     new_item = {}
     for k, v in item.items():
@@ -641,6 +642,9 @@ def transform_item(item, array_fields):
         # Si el campo es un array y viene como NULL, convertir a array vacío
         if snake_key in array_fields and fixed_value is None:
             new_item[snake_key] = []
+        elif stringify_fields and snake_key in stringify_fields:
+            # Forzar este campo a ser un string JSON para evitar errores de BigQuery
+            new_item[snake_key] = json.dumps(fixed_value, ensure_ascii=False) if fixed_value is not None else None
         else:
             new_item[snake_key] = fixed_value
     return new_item
@@ -1315,8 +1319,13 @@ def load_json_to_staging_with_error_handling(
                 # Campo REPEATED con NULL o Campo anidado incorrecto: re-transformar datos
                 print(f"🧹 Re-transformando datos para corregir campo {problematic_field}...")
                 try:
-                    # Re-ejecutar fix_json_format pasando el campo fallido para que sea convertido a [] si es necesario
-                    fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
+                    # Si es repeated, pasarlo a repeated_fields para forzar `[]` si es NULL.
+                    # Si es nested (e.g. "JSON object specified for non-record field"), pasarlo a stringify_fields
+                    # porque el schema inferido por BQ es demasiado restrictivo para este objeto/arreglo anidado complejo.
+                    if fix_type == 'repeated':
+                        fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
+                    else:
+                        fix_json_format(temp_json, temp_fixed, stringify_fields={problematic_field})
                     
                     # Limpiar tabla en caso de que existiera parcialmente
                     bq_client.delete_table(table_ref_staging, not_found_ok=True)
