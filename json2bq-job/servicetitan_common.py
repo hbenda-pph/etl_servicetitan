@@ -639,12 +639,14 @@ def transform_item(item, array_fields, stringify_fields=None):
         # Procesar recursivamente: preserva camelCase dentro de STRUCT
         fixed_value = fix_nested_value(v, snake_key, array_fields)
         
-        # Si el campo es un array y viene como NULL, convertir a array vacío
-        if snake_key in array_fields and fixed_value is None:
-            new_item[snake_key] = []
-        elif stringify_fields and snake_key in stringify_fields:
-            # Forzar este campo a ser un string JSON para evitar errores de BigQuery
+        # Forzar el campo a string JSON ANTES de intentar convertir nulos a array
+        # Esto es vital para evitar que el schema inferido asuma ARRAY cuando
+        # en realidad queremos que todo el campo sea TEXTO.
+        if stringify_fields and snake_key in stringify_fields:
             new_item[snake_key] = json.dumps(fixed_value, ensure_ascii=False) if fixed_value is not None else None
+        # Si el campo es un array pero no está forzado a string, y viene null, hacerlo array vacío
+        elif snake_key in array_fields and fixed_value is None:
+            new_item[snake_key] = []
         else:
             new_item[snake_key] = fixed_value
     return new_item
