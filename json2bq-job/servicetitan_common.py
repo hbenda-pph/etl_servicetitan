@@ -384,13 +384,16 @@ def fix_json_format(local_path, temp_path, repeated_fields=None):
     # Detectar campos array (usando snake_case para campos de nivel superior)
     if repeated_fields is None:
         repeated_fields = set()
-        sample_size = min(1000, total_items)
-        for item in json_data[:sample_size]:
-            if isinstance(item, dict):
-                for k, v in item.items():
-                    snake_key = to_snake_case(k)
-                    if isinstance(v, list):
-                        repeated_fields.add(snake_key)
+    elif not isinstance(repeated_fields, set):
+        repeated_fields = set(repeated_fields)
+        
+    sample_size = min(1000, total_items)
+    for item in json_data[:sample_size]:
+        if isinstance(item, dict):
+            for k, v in item.items():
+                snake_key = to_snake_case(k)
+                if isinstance(v, list):
+                    repeated_fields.add(snake_key)
     
     # Transformar cada item con progreso
     print(f"🔄 Transformando {total_items:,} items a snake_case...")
@@ -438,64 +441,67 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None):
     # Detectar campos array en una muestra
     if repeated_fields is None:
         repeated_fields = set()
-        with open(local_path, 'r', encoding='utf-8') as f:
-            first_char = f.read(1)
-            f.seek(0)
-            
-            if first_char == '[':
-                # JSON array - leer primeros items usando decoder incremental
-                decoder = json.JSONDecoder()
-                buffer = ""
-                items = []
-                chunk_size = 1024 * 1024  # 1MB chunks
-                
-                # Leer primer chunk
-                chunk = f.read(chunk_size)
-                if chunk:
-                    buffer = chunk
-                    idx = 0
-                    # Saltar el '[' inicial
-                    if buffer[idx] == '[':
-                        idx += 1
-                    
-                    # Parsear items hasta tener 100 o terminar el chunk
-                    while idx < len(buffer) and len(items) < 100:
-                        # Buscar el siguiente item
-                        buffer = buffer[idx:].lstrip()
-                        if not buffer or buffer[0] == ']':
-                            break
-                        
-                        try:
-                            obj, idx = decoder.raw_decode(buffer)
-                            items.append(obj)
-                            # Avanzar después del item (saltar coma si existe)
-                            buffer = buffer[idx:].lstrip()
-                            if buffer and buffer[0] == ',':
-                                buffer = buffer[1:].lstrip()
-                            idx = 0
-                        except (ValueError, json.JSONDecodeError):
-                            # Necesitamos más datos, pero ya tenemos suficientes items
-                            if len(items) >= 10:
-                                break
-                            break
-            else:
-                # Newline-delimited JSON - leer primeras líneas
-                items = []
-                for i, line in enumerate(f):
-                    if i >= 100:
-                        break
-                    try:
-                        items.append(json.loads(line.strip()))
-                    except:
-                        pass
+    elif not isinstance(repeated_fields, set):
+        repeated_fields = set(repeated_fields)
         
-        # Detectar campos array
-        for item in items:
-            if isinstance(item, dict):
-                for k, v in item.items():
-                    snake_key = to_snake_case(k)
-                    if isinstance(v, list):
-                        repeated_fields.add(snake_key)
+    with open(local_path, 'r', encoding='utf-8') as f:
+        first_char = f.read(1)
+        f.seek(0)
+        
+        if first_char == '[':
+            # JSON array - leer primeros items usando decoder incremental
+            decoder = json.JSONDecoder()
+            buffer = ""
+            items = []
+            chunk_size = 1024 * 1024  # 1MB chunks
+            
+            # Leer primer chunk
+            chunk = f.read(chunk_size)
+            if chunk:
+                buffer = chunk
+                idx = 0
+                # Saltar el '[' inicial
+                if buffer[idx] == '[':
+                    idx += 1
+                
+                # Parsear items hasta tener 100 o terminar el chunk
+                while idx < len(buffer) and len(items) < 100:
+                    # Buscar el siguiente item
+                    buffer = buffer[idx:].lstrip()
+                    if not buffer or buffer[0] == ']':
+                        break
+                    
+                    try:
+                        obj, idx = decoder.raw_decode(buffer)
+                        items.append(obj)
+                        # Avanzar después del item (saltar coma si existe)
+                        buffer = buffer[idx:].lstrip()
+                        if buffer and buffer[0] == ',':
+                            buffer = buffer[1:].lstrip()
+                        idx = 0
+                    except (ValueError, json.JSONDecodeError):
+                        # Necesitamos más datos, pero ya tenemos suficientes items
+                        if len(items) >= 10:
+                            break
+                        break
+        else:
+            # Newline-delimited JSON - leer primeras líneas
+            items = []
+            for i, line in enumerate(f):
+                if i >= 100:
+                    break
+                try:
+                    items.append(json.loads(line.strip()))
+                except:
+                    pass
+    
+    # Detectar campos array
+    for item in items:
+        if isinstance(item, dict):
+            for k, v in item.items():
+                snake_key = to_snake_case(k)
+                if isinstance(v, list):
+                    repeated_fields.add(snake_key)
     
     # Procesar archivo completo
     with open(local_path, 'r', encoding='utf-8') as f_in:
