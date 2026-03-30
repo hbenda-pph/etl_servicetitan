@@ -1335,6 +1335,12 @@ def load_json_to_staging_with_error_handling(
                     return (True, load_time, None)
                 except Exception as retry_error:
                     error_msg = f"Error reintentando carga tras limpieza de datos para {problematic_field}: {str(retry_error)}"
+                    try:
+                        if 'retry_job' in locals() and hasattr(retry_job, 'errors') and retry_job.errors:
+                            error_details = json.dumps(retry_job.errors, indent=2)
+                            error_msg += f"\nDetalles del error en BigQuery:\n{error_details}"
+                    except:
+                        pass
                     print(f"❌ {error_msg}")
                     return (False, 0, error_msg)
         
