@@ -127,7 +127,7 @@ echo "=================================================="
 # Crear o actualizar el schedule
 # Nota: Usar el formato correcto de la API REST de Cloud Run Jobs
 # El formato correcto es: projects/{project}/locations/{location}/jobs/{job}:run
-JOB_URI="https://${REGION}-run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}:run"
+JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
 
 if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
     echo "📝 Schedule existente encontrado. Actualizando..."
@@ -137,8 +137,8 @@ if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --projec
         --schedule="${SCHEDULE_CRON}" \
         --uri="${JOB_URI}" \
         --http-method=POST \
-        --oidc-service-account-email=${SERVICE_ACCOUNT} \
-        --oidc-token-audience="${JOB_URI}" \
+        --oauth-service-account-email=${SERVICE_ACCOUNT} \
+        --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform \
         --time-zone="America/New_York"
 else
     echo "📝 Schedule no existe. Creando nuevo schedule..."
@@ -148,8 +148,8 @@ else
         --schedule="${SCHEDULE_CRON}" \
         --uri="${JOB_URI}" \
         --http-method=POST \
-        --oidc-service-account-email=${SERVICE_ACCOUNT} \
-        --oidc-token-audience="${JOB_URI}" \
+        --oauth-service-account-email=${SERVICE_ACCOUNT} \
+        --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform \
         --time-zone="America/New_York"
 fi
 
