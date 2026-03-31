@@ -377,7 +377,7 @@ Ejemplos:
     args = parser.parse_args()
     
     print(f"\n{'='*80}")
-    print("🔍 Script de Prueba: ServiceTitan JSON → BigQuery")
+    print("Script de Prueba: ServiceTitan JSON -> BigQuery")
     print(f"{'='*80}")
     if args.company_id:
         print(f"📋 Compañía ID: {args.company_id}")

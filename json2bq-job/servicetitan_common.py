@@ -1346,16 +1346,14 @@ def load_json_to_staging_with_error_handling(
                     print(f"❌ [load_json_to_staging_with_error_handling] Error completo en corrección de esquema:\n{error_trace}")
                     return (False, 0, f"Error corrigiendo esquema: {str(schema_error)}")
             elif fix_type in ['repeated', 'nested']:
-                # Campo REPEATED con NULL o Campo anidado incorrecto: re-transformar datos
-                print(f"🧹 Re-transformando datos para corregir campo {problematic_field}...")
+                # Campo REPEATED/NESTED problemático: la estrategia más robusta es stringify.
+                # Intentar inyectar `[]` no resuelve porque BigQuery autodetect puede inferir el campo como
+                # RECORD REPEATED REQUIRED (si las primeras filas tienen datos), y luego rechazar cualquier
+                # fila donde el campo sea null o esté ausente.
+                # Stringify lo convierte a STRING NULLABLE, que BQ siempre acepta.
+                print(f"🧹 Re-transformando datos para corregir campo {problematic_field} (convirtiendo a STRING)...")
                 try:
-                    # Si es repeated, pasarlo a repeated_fields para forzar `[]` si es NULL.
-                    # Si es nested (e.g. "JSON object specified for non-record field"), pasarlo a stringify_fields
-                    # porque el schema inferido por BQ es demasiado restrictivo para este objeto/arreglo anidado complejo.
-                    if fix_type == 'repeated':
-                        fix_json_format(temp_json, temp_fixed, repeated_fields={problematic_field})
-                    else:
-                        fix_json_format(temp_json, temp_fixed, stringify_fields={problematic_field})
+                    fix_json_format(temp_json, temp_fixed, stringify_fields={problematic_field})
                     
                     # Limpiar tabla en caso de que existiera parcialmente
                     bq_client.delete_table(table_ref_staging, not_found_ok=True)
