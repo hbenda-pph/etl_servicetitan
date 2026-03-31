@@ -173,7 +173,7 @@ def load_endpoints_from_metadata():
         print(f"📋 Cargados {len(endpoints)} endpoints desde metadata")
         return endpoints
     except Exception as e:
-        print(f"⚠️  Error cargando endpoints desde metadata: {str(e)}")
+        print(f"⚠️ [load_endpoints_from_metadata] Error cargando endpoints desde metadata: {str(e)}")
         return []
 
 def to_snake_case(name):
@@ -222,14 +222,14 @@ def get_standardized_table_name(endpoint):
             return table_name
         else:
             # Si no se encuentra en metadata, usar normalización por defecto
-            print(f"⚠️  Endpoint '{endpoint}' no encontrado en metadata, usando normalización por defecto")
+            print(f"⚠️ [get_standardized_table_name] Endpoint '{endpoint}' no encontrado en metadata, usando normalización por defecto")
             normalized = _normalize_table_name_fallback(endpoint)
             get_standardized_table_name._cache[cache_key] = normalized
             return normalized
             
     except Exception as e:
         # En caso de error, usar normalización por defecto
-        print(f"⚠️  Error consultando metadata para '{endpoint}': {str(e)}. Usando normalización por defecto")
+        print(f"⚠️ [get_standardized_table_name] Error consultando metadata para '{endpoint}': {str(e)}. Usando normalización por defecto")
         normalized = _normalize_table_name_fallback(endpoint)
         get_standardized_table_name._cache[cache_key] = normalized
         return normalized
@@ -275,9 +275,9 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
         
         errors = client.insert_rows_json(table_id, [row])
         if errors:
-            print(f"❌ Error insertando log en BigQuery: {errors}")
+            print(f"❌ [log_event_bq] Error insertando log en BigQuery: {errors}")
     except Exception as e:
-        print(f"❌ Error en logging: {str(e)}")
+        print(f"❌ [log_event_bq] Error en logging: {str(e)}")
 
 def fix_nested_value(value, field_path="", known_array_fields=None):
     """
@@ -286,13 +286,18 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     - Corrige objetos que deberían ser arrays (ej: serialNumbers)
     - Preserva nombres originales (camelCase) dentro de STRUCT
     """
+    snake_path = to_snake_case(field_path) if field_path else ""
+    path_parts = snake_path.split('.')
+    is_array_field = known_array_fields and any(part in known_array_fields for part in path_parts)
+
     if value is None:
+        if is_array_field:
+            return []
         return None
     
     # Si es un diccionario/objeto (STRUCT)
     if isinstance(value, dict):
         field_name_lower = field_path.lower() if field_path else ""
-        snake_path = to_snake_case(field_path) if field_path else ""
         
         # 1. Regla hardcodeada (serialNumbers)
         if 'serial' in field_name_lower and 'number' in field_name_lower:
@@ -307,7 +312,7 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
             
         # 2. Regla dinámica: si está explícitamente en known_array_fields,
         # significa que BQ esperaba un array (o un field simple) pero vino como objeto {}
-        if known_array_fields and snake_path in known_array_fields:
+        if is_array_field:
             if not fixed_dict:
                 return []
             else:
@@ -584,7 +589,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                                 if not found_separator:
                                     # No se encontró separador, probablemente fin del archivo
                                     if items_processed == 0:
-                                        print(f"⚠️  Error parseando JSON: {str(e)[:200]}")
+                                        print(f"⚠️ [fix_json_format_streaming] Error parseando JSON: {str(e)[:200]}")
                                     break
                             else:
                                 # Hay más datos, esperar al siguiente chunk
@@ -621,12 +626,12 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                         except Exception as e:
                             # Log error pero continuar
                             if items_processed == 0:
-                                print(f"⚠️  Error parseando línea: {str(e)[:100]}")
+                                print(f"⚠️ [fix_json_format_streaming] Error parseando línea: {str(e)[:100]}")
                             pass
     
     total_time = time.time() - start_time
     if items_processed == 0:
-        print(f"❌ ERROR: No se procesaron items. El archivo puede estar vacío o mal formado.")
+        print(f"❌ [fix_json_format_streaming] ERROR: No se procesaron items. El archivo puede estar vacío o mal formado.")
     else:
         print(f"✅ Transformación completada: {items_processed:,} items procesados en {total_time:.1f}s ({items_processed/total_time:.0f} items/seg)")
 
@@ -637,6 +642,7 @@ def transform_item(item, array_fields, stringify_fields=None):
         snake_key = to_snake_case(k)  # snake_case para campos de nivel superior
         
         # Procesar recursivamente: preserva camelCase dentro de STRUCT
+        # Usamos snake_key (lower) para comparar con array_fields
         fixed_value = fix_nested_value(v, snake_key, array_fields)
         
         # Forzar el campo a string JSON ANTES de intentar convertir nulos a array
@@ -730,6 +736,15 @@ def validate_json_file(file_path, max_lines_to_check=1000):
     except Exception as e:
         return (False, f"Error validando archivo JSON: {str(e)}", None)
 
+def clean_bq_error(e):
+    """Limpia el mensaje de error de BigQuery quitando el Location y Job ID para mejorar los logs."""
+    error_str = str(e)
+    if 'Location:' in error_str:
+        error_str = error_str.split('\n\nLocation:')[0]
+    elif '\nLocation:' in error_str:
+        error_str = error_str.split('\nLocation:')[0]
+    return error_str
+
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
@@ -742,7 +757,7 @@ def _schema_field_to_sql(field):
     field_name = field.name
     field_type = field.field_type
     
-    if field_type == 'STRUCT':
+    if field_type == 'STRUCT' or field_type == 'RECORD':
         fields_sql = ', '.join([_schema_field_to_sql(f) for f in field.fields])
         struct_def = f"STRUCT<{fields_sql}>"
     else:
@@ -854,11 +869,11 @@ def align_schemas_before_merge(bq_client, staging_table, final_table, project_id
                 print(f"  ✅ Campo {field_name} actualizado: {old_type} → {new_type}")
             else:
                 # STRUCT: más complejo, se manejará después del MERGE si es necesario
-                print(f"  ⚠️  Campo {field_name} es STRUCT, se manejará después del MERGE si es necesario")
+                print(f"  ⚠️ [align_schemas_before_merge] Campo {field_name} es STRUCT, se manejará después del MERGE si es necesario")
         
         except Exception as e:
             error_msg = f"Error corrigiendo campo {field_name}: {str(e)}"
-            print(f"  ❌ {error_msg}")
+            print(f"  ❌ [align_schemas_before_merge] {error_msg}")
             return (True, corrections_made, error_msg)
     
     if corrections_made:
@@ -1037,7 +1052,7 @@ def load_json_to_staging_with_error_handling(
         if clean_errors:
             error_msg = "\n".join([f"  • {msg}" for msg in clean_errors])
             # Imprimir al usuario de manera limpia
-            print(f"❌ Error de BigQuery detectado:")
+            print(f"❌ [load_json_to_staging_with_error_handling] Error de BigQuery detectado:")
             print(f"{error_msg}{problematic_row_preview}")
         
         # Intentar extraer campo REPEATED del mensaje de error
@@ -1099,7 +1114,7 @@ def load_json_to_staging_with_error_handling(
                         bq_client.delete_table(table_ref_staging, not_found_ok=True)
                         print(f"🧹 Tabla staging eliminada para recrear con esquema corregido")
                     except Exception as delete_error:
-                        print(f"⚠️  Error eliminando tabla staging: {str(delete_error)[:100]}")
+                        print(f"⚠️ [load_json_to_staging_with_error_handling] Error eliminando tabla staging: {str(delete_error)[:100]}")
                     
                     # Crear esquema mínimo con solo el campo problemático como STRING
                     # BigQuery inferirá el resto de los campos automáticamente
@@ -1162,13 +1177,13 @@ def load_json_to_staging_with_error_handling(
                         else:
                             # Si no se pudo inferir, usar solo el campo corregido
                             updated_schema = [corrected_field]
-                            print(f"⚠️  No se pudo inferir esquema completo, usando solo campo {problematic_field} como STRING")
+                            print(f"⚠️ [load_json_to_staging_with_error_handling] No se pudo inferir esquema completo, usando solo campo {problematic_field} como STRING")
                         
                         # Limpiar tabla de muestra
                         bq_client.delete_table(sample_table_ref, not_found_ok=True)
                         
                     except Exception as sample_error:
-                        print(f"⚠️  Error infiriendo esquema de muestra: {str(sample_error)[:200]}")
+                        print(f"⚠️ [load_json_to_staging_with_error_handling] Error infiriendo esquema de muestra: {str(sample_error)[:200]}")
                         # Si falla, usar solo el campo corregido
                         updated_schema = [corrected_field]
                     finally:
@@ -1282,7 +1297,7 @@ def load_json_to_staging_with_error_handling(
                             
                             # Si no encontramos campo específico pero hay error, intentar usar autodetect con max_bad_records
                             if not another_field and retry_count < max_retries - 1:
-                                print(f"⚠️  Error genérico detectado, intentando con autodetect y max_bad_records=10...")
+                                print(f"⚠️ [load_json_to_staging_with_error_handling] Error genérico detectado, intentando con autodetect y max_bad_records=10...")
                                 try:
                                     # Eliminar tabla y recrear con autodetect permitiendo algunos errores
                                     bq_client.delete_table(table_ref_staging, not_found_ok=True)
@@ -1306,7 +1321,7 @@ def load_json_to_staging_with_error_handling(
                                     print(f"✅ Datos cargados exitosamente con autodetect (algunos registros pueden haberse omitido)")
                                     return (True, load_time, None)
                                 except Exception as autodetect_error:
-                                    print(f"⚠️  Autodetect también falló: {str(autodetect_error)[:200]}")
+                                    print(f"⚠️ [load_json_to_staging_with_error_handling] Autodetect también falló: {str(autodetect_error)[:200]}")
                                     retry_count += 1
                                     continue
                             
@@ -1315,7 +1330,7 @@ def load_json_to_staging_with_error_handling(
                 except Exception as schema_error:
                     import traceback
                     error_trace = traceback.format_exc()
-                    print(f"❌ Error completo en corrección de esquema:\n{error_trace}")
+                    print(f"❌ [load_json_to_staging_with_error_handling] Error completo en corrección de esquema:\n{error_trace}")
                     return (False, 0, f"Error corrigiendo esquema: {str(schema_error)}")
             elif fix_type in ['repeated', 'nested']:
                 # Campo REPEATED con NULL o Campo anidado incorrecto: re-transformar datos
@@ -1362,7 +1377,7 @@ def load_json_to_staging_with_error_handling(
                             error_msg += f"\nDetalles del error en BigQuery:\n{error_details}"
                     except:
                         pass
-                    print(f"❌ {error_msg}")
+                    print(f"❌ [load_json_to_staging_with_error_handling] {error_msg}")
                     return (False, 0, error_msg)
         
         # Si no se pudo corregir, retornar error
@@ -1420,15 +1435,14 @@ def execute_merge_or_insert(
                 try:
                     field_def = _schema_field_to_sql(new_field)
                     alter_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {field_def}"
-                    query_job = bq_client.query(alter_sql)
-                    query_job.result()
-                    print(f"  ✅ Columna {new_field.name} agregada al esquema")
+                    bq_client.query(alter_sql).result()
+                    print(f"  ✨ Campo {new_field.name} agregado a {dataset_final}.{table_final}")
                 except Exception as e:
-                    print(f"  ⚠️  No se pudo agregar {new_field.name} con ALTER TABLE: {str(e)}")
-                    print(f"  ⚠️  Continuando sin agregar esta columna. El MERGE manejará cualquier problema de esquema.")
+                    print(f"  ⚠️ [execute_merge_or_insert] No se pudo agregar {new_field.name} con ALTER TABLE: {clean_bq_error(e)}")
+                    print(f"  ⚠️ [execute_merge_or_insert] Continuando sin agregar esta columna. Se ignorará en el MERGE.")
             print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)}")
         except Exception as schema_error:
-            print(f"⚠️  Error al actualizar esquema: {str(schema_error)}")
+            print(f"⚠️ [execute_merge_or_insert] Error al actualizar esquema: {str(schema_error)}")
     
     # Verificar si la tabla final está vacía (primera carga)
     is_first_load = final_table.num_rows == 0
@@ -1466,7 +1480,7 @@ def execute_merge_or_insert(
         except Exception as e:
             error_msg = str(e)
             merge_time = time.time() - merge_start
-            print(f"❌ INSERT directo falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
+            print(f"❌ [execute_merge_or_insert] INSERT directo falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
             if log_event_callback:
                 log_event_callback(
                     company_id=company_id,
@@ -1482,11 +1496,18 @@ def execute_merge_or_insert(
         # Tabla tiene datos: usar MERGE incremental
         print(f"🔄 Tabla tiene datos. Usando MERGE incremental...")
         
-        # Construir UPDATE SET con todas las columnas de staging (ahora que agregamos las nuevas)
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in sorted(staging_cols)])
+        # RECALCULAR columnas finales disponibles (por si algún ALTER TABLE falló)
+        final_table_refresh = bq_client.get_table(final_table.reference)
+        final_cols_actual = {col.name for col in final_table_refresh.schema if col.name != 'id' and not col.name.startswith('_etl_')}
         
-        # Para INSERT, usar todas las columnas de staging + el id
-        cols_list = ['id'] + sorted(list(staging_cols))
+        # INTERSECCIÓN SEGURA: Solo actualizar e insertar columnas que REALMENTE existen en ambas tablas
+        safe_cols = sorted(list(staging_cols.intersection(final_cols_actual)))
+        
+        # Construir UPDATE SET con las columnas seguras
+        update_set = ', '.join([f'T.{col} = S.{col}' for col in safe_cols])
+        
+        # Para INSERT, usar columnas seguras + el id
+        cols_list = ['id'] + safe_cols
         insert_cols = cols_list
         insert_values = [f'S.{col}' for col in cols_list]
         
@@ -1520,7 +1541,7 @@ def execute_merge_or_insert(
         except Exception as e:
             error_msg = str(e)
             merge_time = time.time() - merge_start
-            print(f"❌ MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
+            print(f"❌ [execute_merge_or_insert] MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
             if log_event_callback:
                 log_event_callback(
                     company_id=company_id,

@@ -80,7 +80,7 @@ def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, tab
             return 'SYNC'
             
     except Exception as e:
-        print(f"⚠️  Error detectando cambios: {str(e)}")
+        print(f"⚠️ [detectar_cambios_reales] Error detectando cambios: {str(e)}")
         return 'UPDATE'  # Por defecto, asumir UPDATE    
 
 def process_company(row):
@@ -95,7 +95,9 @@ def process_company(row):
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
     
+    endpoints_count = 0
     for endpoint_name, table_name in ENDPOINTS:
+        endpoints_count += 1
         endpoint_start_time = time.time()
         # Usar table_name directamente desde metadata para archivos JSON y tablas
         json_filename = f"servicetitan_{table_name}.json"
@@ -109,10 +111,10 @@ def process_company(row):
             download_start = time.time()
             blob = bucket.blob(json_filename)
             if not blob.exists():
-                print(f"⚠️  Archivo no encontrado: {json_filename} en bucket {bucket_name}")
+                print(f"⚠️ [process_company] Archivo no encontrado: {json_filename} en bucket {bucket_name}")
                 # Paso 4: MERGE no ejecutado (archivo faltante)
                 merge_time = 0.0  # No hubo intento de MERGE
-                print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: archivo {json_filename} no encontrado en bucket")
+                print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: archivo {json_filename} no encontrado en bucket")
                 log_event_bq_all(
                     company_id=company_id,
                     company_name=company_name,
@@ -124,7 +126,7 @@ def process_company(row):
                 )
                 # Paso 5: Endpoint completado con errores
                 endpoint_time = time.time() - endpoint_start_time
-                print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+                print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                 continue
             blob.download_to_filename(temp_json)
             download_time = time.time() - download_start
@@ -135,8 +137,8 @@ def process_company(row):
             print(f"🔍 Validando estructura JSON...")
             is_valid, validation_error, json_type = validate_json_file(temp_json)
             if not is_valid:
-                print(f"❌ ARCHIVO JSON MAL FORMADO: {validation_error}")
-                print(f"❌ El archivo {json_filename} está corrupto o mal generado por el job anterior (st2json)")
+                print(f"❌ [process_company] ARCHIVO JSON MAL FORMADO: {validation_error}")
+                print(f"❌ [process_company] El archivo {json_filename} está corrupto o mal generado por el job anterior (st2json)")
                 log_event_bq_all(
                     company_id=company_id,
                     company_name=company_name,
@@ -148,14 +150,14 @@ def process_company(row):
                 )
                 # Paso 4: MERGE no ejecutado (archivo corrupto)
                 merge_time = 0.0
-                print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: archivo JSON mal formado")
+                print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: archivo JSON mal formado")
                 # Paso 5: Endpoint completado con errores
                 endpoint_time = time.time() - endpoint_start_time
-                print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+                print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                 continue
             print(f"✅ JSON válido (tipo: {json_type})")
         except Exception as e:
-            print(f"❌ Error descargando {json_filename}: {str(e)}")
+            print(f"❌ [process_company] Error descargando {json_filename}: {str(e)}")
             log_event_bq_all(
                 company_id=company_id,
                 company_name=company_name,
@@ -167,10 +169,10 @@ def process_company(row):
             )
             # Paso 4: MERGE no ejecutado (error en descarga)
             merge_time = 0.0  # No hubo intento de MERGE
-            print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error descargando archivo - {str(e)}")
+            print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: error descargando archivo - {str(e)}")
             # Paso 5: Endpoint completado con errores
             endpoint_time = time.time() - endpoint_start_time
-            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
         # Transformar a newline-delimited y snake_case (primera pasada)
@@ -184,7 +186,7 @@ def process_company(row):
             if file_size_mb <= 100:
                 print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
         except Exception as e:
-            print(f"❌ Error transformando {json_filename}: {str(e)}")
+            print(f"❌ [process_company] Error transformando {json_filename}: {str(e)}")
             log_event_bq_all(
                 company_id=company_id,
                 company_name=company_name,
@@ -196,10 +198,10 @@ def process_company(row):
             )
             # Paso 4: MERGE no ejecutado (error en transformación)
             merge_time = 0.0  # No hubo intento de MERGE
-            print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error transformando archivo - {str(e)}")
+            print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: error transformando archivo - {str(e)}")
             # Paso 5: Endpoint completado con errores
             endpoint_time = time.time() - endpoint_start_time
-            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
         # Cargar a tabla staging en BigQuery
@@ -246,13 +248,13 @@ def process_company(row):
         )
         
         if not success:
-            print(f"❌ Error cargando a tabla staging: {error_msg}")
+            print(f"❌ [process_company] Error cargando a tabla staging: {error_msg}")
             # Paso 4: MERGE no ejecutado (error cargando a staging)
             merge_time = 0.0  # No hubo intento de MERGE
-            print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
+            print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
             # Paso 5: Endpoint completado con errores
             endpoint_time = time.time() - endpoint_start_time
-            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
         # Carga exitosa, continuar con el proceso
@@ -303,7 +305,7 @@ def process_company(row):
         )
         
         if alignment_error:
-            print(f"❌ Error alineando esquemas: {alignment_error}")
+            print(f"❌ [process_company] Error alineando esquemas: {alignment_error}")
             log_event_bq_all(
                 company_id=company_id,
                 company_name=company_name,
@@ -340,9 +342,9 @@ def process_company(row):
             endpoint_time = time.time() - endpoint_start_time
             print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
         else:
-            print(f"❌ Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
+            print(f"❌ [process_company] Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
             endpoint_time = time.time() - endpoint_start_time
-            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
         
         # Borrar archivos temporales
         try:
@@ -356,6 +358,8 @@ def process_company(row):
     print(f"\n{'='*80}")
     print(f"✅ Compañía {company_name} (company_id: {company_id}) completada en {company_elapsed:.1f} segundos ({company_elapsed/60:.1f} minutos)")
     print(f"{'='*80}")
+    
+    return True, endpoints_count, 0, 0, None
 
 def main():
     # Tiempo límite del job (40 minutos = 2400 segundos)
@@ -432,7 +436,7 @@ def main():
         
         # Si quedan menos de 5 minutos, loguear advertencia
         if remaining_time < 300:  # 5 minutos
-            print(f"⚠️  ADVERTENCIA: Quedan {remaining_time // 60:.1f} minutos antes del timeout")
+            print(f"⚠️ [main] ADVERTENCIA: Quedan {remaining_time // 60:.1f} minutos antes del timeout")
             log_event_bq_all(
                 event_type="WARNING",
                 event_title="Advertencia de timeout",
@@ -484,7 +488,7 @@ def main():
                 event_title="Error procesando compañía",
                 event_message=f"Error procesando compañía {row.company_name}: {str(e)}"
             )
-            print(f"❌ Error procesando compañía {row.company_name}: {str(e)}")
+            print(f"❌ [main] Error procesando compañía {row.company_name}: {str(e)}")
             # Continuar con la siguiente compañía
     
     # Log de fin del proceso ETL

@@ -76,7 +76,7 @@ def detectar_cambios_reales(staging_df, final_df, project_id, dataset_final, tab
             return 'SYNC'
             
     except Exception as e:
-        print(f"⚠️  Error detectando cambios: {str(e)}")
+        print(f"⚠️ [detectar_cambios_reales] Error detectando cambios: {str(e)}")
         return 'UPDATE'  # Por defecto, asumir UPDATE    
 
 def process_company(row):
@@ -132,7 +132,7 @@ def process_company(row):
                 #     event_title="Archivo no encontrado",
                 #     event_message=f"Archivo {json_filename} no encontrado en bucket {bucket_name}"
                 # )
-                print(f"⚠️  Archivo no encontrado: {json_filename} en bucket {bucket_name}")
+                print(f"⚠️ [process_company] Archivo no encontrado: {json_filename} en bucket {bucket_name}")
                 continue
             blob.download_to_filename(temp_json)
             print(f"⬇️  Descargado {json_filename} de gs://{bucket_name}")
@@ -146,7 +146,7 @@ def process_company(row):
             #     event_title="Error descargando archivo",
             #     event_message=f"Error descargando {json_filename}: {str(e)}"
             # )
-            print(f"❌ Error descargando {json_filename}: {str(e)}")
+            print(f"❌ [process_company] Error descargando {json_filename}: {str(e)}")
             continue
         
         # Transformar a newline-delimited y snake_case (primera pasada)
@@ -163,7 +163,7 @@ def process_company(row):
             #     event_title="Error transformando archivo",
             #     event_message=f"Error transformando {json_filename}: {str(e)}"
             # )
-            print(f"❌ Error transformando {json_filename}: {str(e)}")
+            print(f"❌ [process_company] Error transformando {json_filename}: {str(e)}")
             continue
         
         # Cargar a tabla staging en BigQuery
@@ -204,11 +204,11 @@ def process_company(row):
         )
         
         if not success:
-            print(f"❌ Error cargando a tabla staging: {error_msg}")
+            print(f"❌ [process_company] Error cargando a tabla staging: {error_msg}")
             merge_time = 0.0
-            print(f"❌ MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
+            print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: error cargando a staging - {error_msg}")
             endpoint_time = time.time() - endpoint_start_time
-            print(f"❌ Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
         # Asegurar que la tabla final existe
@@ -255,7 +255,7 @@ def process_company(row):
         )
         
         if alignment_error:
-            print(f"❌ Error alineando esquemas: {alignment_error}")
+            print(f"❌ [process_company] Error alineando esquemas: {alignment_error}")
             
         if needs_correction:
             final_table = bq_client.get_table(table_ref_final)
@@ -281,7 +281,7 @@ def process_company(row):
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
             print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
         else:
-            print(f"❌ Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
+            print(f"❌ [process_company] Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
         
         # Borrar archivos temporales
         try:
@@ -325,7 +325,7 @@ def main():
         #     event_title="No se encontró compañía INBOX",
         #     event_message="No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id)."
         # )
-        print("❌ No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id).")
+        print("❌ [main] No se encontró ninguna compañía INBOX activa en la tabla companies (con company_project_id).")
         return
     
     total = len(results)
@@ -346,7 +346,7 @@ def main():
             #     event_title="Error procesando compañía",
             #     event_message=f"Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}"
             # )
-            print(f"❌ Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}")
+            print(f"❌ [main] Error procesando compañía INBOX {row.company_name} (ID: {row.company_id}): {str(e)}")
 
         print(f"\n{'='*80}")
 

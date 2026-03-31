@@ -74,7 +74,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
                 filtered_endpoints.append((endpoint_name, table_name))
         
         if not filtered_endpoints:
-            print(f"⚠️  No se encontraron endpoints que coincidan con: {endpoints_filter}")
+            print(f"⚠️ [process_company] No se encontraron endpoints que coincidan con: {endpoints_filter}")
             return
         
         endpoints_to_process = filtered_endpoints
@@ -103,7 +103,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             download_start = time.time()
             blob = bucket.blob(json_filename)
             if not blob.exists():
-                print(f"⚠️  Archivo no encontrado: {json_filename} en bucket {bucket_name}")
+                print(f"⚠️ [process_company] Archivo no encontrado: {json_filename} en bucket {bucket_name}")
                 log_event_bq(
                     company_id=company_id,
                     company_name=company_name,
@@ -124,8 +124,8 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             print(f"🔍 Validando estructura JSON...")
             is_valid, validation_error, json_type = validate_json_file(temp_json)
             if not is_valid:
-                print(f"❌ ARCHIVO JSON MAL FORMADO: {validation_error}")
-                print(f"❌ El archivo {json_filename} está corrupto o mal generado por el job anterior (st2json)")
+                print(f"❌ [process_company] ARCHIVO JSON MAL FORMADO: {validation_error}")
+                print(f"❌ [process_company] El archivo {json_filename} está corrupto o mal generado por el job anterior (st2json)")
                 log_event_bq(
                     company_id=company_id,
                     company_name=company_name,
@@ -139,7 +139,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
                 continue
             print(f"✅ JSON válido (tipo: {json_type})")
         except Exception as e:
-            print(f"❌ Error descargando {json_filename}: {str(e)}")
+            print(f"❌ [process_company] Error descargando {json_filename}: {str(e)}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
@@ -163,7 +163,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             if file_size_mb <= 100:
                 print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
         except Exception as e:
-            print(f"❌ Error transformando {json_filename}: {str(e)}")
+            print(f"❌ [process_company] Error transformando {json_filename}: {str(e)}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
@@ -224,7 +224,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
         )
         
         if not success:
-            print(f"❌ Error cargando a staging: {error_msg}")
+            print(f"❌ [process_company] Error cargando a staging: {error_msg}")
             continue
         
         if load_time:
@@ -263,7 +263,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
         )
         
         if alignment_error:
-            print(f"❌ Error alineando esquemas: {alignment_error}")
+            print(f"❌ [process_company] Error alineando esquemas: {alignment_error}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
@@ -306,7 +306,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
         else:
             # MERGE/INSERT falló
-            print(f"❌ Error en MERGE/INSERT: {merge_error_msg}")
+            print(f"❌ [process_company] Error en MERGE/INSERT: {merge_error_msg}")
             log_event_bq(
                 company_id=company_id,
                 company_name=company_name,
@@ -415,7 +415,7 @@ Ejemplos:
         results = list(client.query(query, job_config=job_config).result())
         
         if not results:
-            print(f"❌ No se encontró compañía con ID {args.company_id} o no está activa (company_bigquery_status = TRUE)")
+            print(f"❌ [main] No se encontró compañía con ID {args.company_id} o no está activa (company_bigquery_status = TRUE)")
             return
         
         companies = results
@@ -430,7 +430,7 @@ Ejemplos:
         results = list(client.query(query).result())
         
         if not results:
-            print(f"❌ No se encontraron compañías activas (company_bigquery_status = TRUE)")
+            print(f"❌ [main] No se encontraron compañías activas (company_bigquery_status = TRUE)")
             return
         
         companies = results
@@ -451,7 +451,7 @@ Ejemplos:
         except Exception as e:
             failed_count += 1
             print(f"\n{'='*80}")
-            print(f"❌ Error procesando compañía {row.company_id} ({row.company_name}): {str(e)}")
+            print(f"❌ [main] Error procesando compañía {row.company_id} ({row.company_name}): {str(e)}")
             print(f"{'='*80}")
             # Continuar con la siguiente compañía en lugar de detener todo el proceso
             continue
@@ -462,7 +462,7 @@ Ejemplos:
     print(f"📊 Total de compañías: {total_companies}")
     print(f"✅ Procesadas exitosamente: {processed_count}")
     if failed_count > 0:
-        print(f"❌ Fallidas: {failed_count}")
+        print(f"❌ [main] Fallidas: {failed_count}")
     print(f"{'='*80}")
 
 
