@@ -838,69 +838,25 @@ def align_schemas_before_merge(bq_client, staging_table, final_table, project_id
                 })
     
     if not incompatible_fields:
-        return (False, [], None)
+        return (False, [], None, {})
     
-    # Mostrar incompatibilidades detectadas
+    # BigQuery NO permite cambiar tipos de columnas existentes via PATCH/update_table.
+    # Usamos SAFE_CAST en el MERGE (se hace en execute_merge_or_insert).
+    # Aquí solo reportamos las incompatibilidades.
     print(f"🔍 Incompatibilidades de esquema detectadas ({len(incompatible_fields)} campos):")
     for inc in incompatible_fields:
         print(f"  • {inc['name']}: staging={inc['staging_type']}, final={inc['final_type']}")
-    
-    # Corregir cada incompatibilidad
-    print(f"🔧 Corrigiendo esquema de tabla final para alinearlo con staging...")
-    
+
+    type_mismatches = {}
     for inc in incompatible_fields:
         field_name = inc['name']
-        staging_field = inc['staging_field']
-        new_type = inc['staging_type']
-        old_type = inc['final_type']
-        
-        try:
-            # Para tipos simples (no STRUCT), usar ALTER TABLE para cambiar el tipo
-            if staging_field.field_type != 'STRUCT':
-                # BigQuery NO permite cambiar tipos que implican pérdida de precisión (ej: STRING → INTEGER).
-                # Regla: si la tabla final tiene un tipo más amplio (STRING), lo respetamos.
-                # Si la tabla final tiene un tipo más estrecho (INTEGER) y el staging trae STRING, lo actualizamos.
-                NUMERIC_TYPES = {'INTEGER', 'INT64', 'FLOAT', 'FLOAT64', 'NUMERIC', 'BIGNUMERIC'}
-                final_is_string = final_field.field_type == 'STRING'
-                staging_is_numeric = staging_field.field_type in NUMERIC_TYPES
-                
-                if final_is_string and staging_is_numeric:
-                    # Final=STRING, staging=INTEGER/FLOAT: STRING ya contiene todo, NO intentar cambiar.
-                    # El MERGE usará CAST implícito o la intersección segura de columnas.
-                    print(f"  ⚠️ [align_schemas_before_merge] Campo {field_name}: final={old_type} es más amplio que staging={new_type}. Manteniendo STRING.")
-                    continue  # No cambiar nada, seguir con el siguiente campo
-                
-                # Para otros casos (ej: INTEGER → STRING), intentar actualizar
-                updated_schema = []
-                for field in final_schema:
-                    if field.name == field_name:
-                        updated_schema.append(staging_field)
-                    else:
-                        updated_schema.append(field)
-                
-                final_table.schema = updated_schema
-                bq_client.update_table(final_table, ['schema'])
-                
-                corrections_made.append({
-                    'field': field_name,
-                    'old_type': old_type,
-                    'new_type': new_type
-                })
-                print(f"  ✅ Campo {field_name} actualizado: {old_type} → {new_type}")
-            else:
-                # STRUCT: más complejo, se manejará después del MERGE si es necesario
-                print(f"  ⚠️ [align_schemas_before_merge] Campo {field_name} es STRUCT, se manejará después del MERGE si es necesario")
-        
-        except Exception as e:
-            error_msg = f"Error corrigiendo campo {field_name}: {str(e)}"
-            print(f"  ❌ [align_schemas_before_merge] {error_msg}")
-            return (True, corrections_made, error_msg)
-    
-    if corrections_made:
-        print(f"✅ Esquema corregido: {len(corrections_made)} campos actualizados")
-        return (True, corrections_made, None)
-    else:
-        return (False, [], None)
+        if inc['staging_field'].field_type == 'STRUCT':
+            print(f"  ⚠️ [align_schemas_before_merge] Campo {field_name} es STRUCT con tipo distinto, se ignora.")
+            continue
+        type_mismatches[field_name] = {'staging': inc['staging_type'], 'final': inc['final_type']}
+        print(f"  ⚠️ [align_schemas_before_merge] Campo {field_name}: se usará SAFE_CAST en el MERGE (staging={inc['staging_type']}, final={inc['final_type']}).")
+
+    return (bool(type_mismatches), list(type_mismatches.keys()), None, type_mismatches)
 
 def load_json_to_staging_with_error_handling(
     bq_client, temp_fixed, temp_json, table_ref_staging, 
@@ -1392,7 +1348,7 @@ def load_json_to_staging_with_error_handling(
 def execute_merge_or_insert(
     bq_client, staging_table, final_table, project_id, dataset_final, table_final,
     dataset_staging, table_staging, merge_start, log_event_callback=None,
-    company_id=None, company_name=None, endpoint_name=None
+    company_id=None, company_name=None, endpoint_name=None, type_mismatches=None
 ):
     """
     Ejecuta MERGE o INSERT directo dependiendo de si la tabla final está vacía.
@@ -1530,14 +1486,41 @@ def execute_merge_or_insert(
                     print(f"⚠️ [execute_merge_or_insert] No se pudo agregar 'id' a {dataset_final}.{table_final}: {clean_bq_error(alter_id_err)}")
             
             if not final_has_id:
-                # Sin 'id' no hay MERGE posible — usar INSERT directo (WRITE_TRUNCATE es muy destructivo,
-                # así que solo insertamos los nuevos registros sin borrar los existentes)
-                print(f"⚠️ [execute_merge_or_insert] Tabla {dataset_final}.{table_final} no tiene 'id'. No es posible MERGE incremental.")
-                merge_time = time.time() - merge_start
-                return (False, merge_time, f"Tabla {table_final} no tiene campo 'id' requerido para MERGE. Revisar origen de la tabla.")
+                # Sin 'id': hacer TRUNCATE + INSERT (reemplazo total). Apropiado para tablas de settings.
+                print(f"\u26a0\ufe0f [execute_merge_or_insert] Tabla {dataset_final}.{table_final} no tiene 'id'. Usando TRUNCATE + INSERT (reemplazo total).")
+                try:
+                    truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
+                    bq_client.query(truncate_sql).result()
+                    # Columnas comunes (seguras) sin 'id'
+                    trunc_cols = safe_cols
+                    insert_trunc_sql = f'''
+                        INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
+                            {', '.join(trunc_cols)}, _etl_synced, _etl_operation
+                        )
+                        SELECT {', '.join([f'S.{c}' for c in trunc_cols])},
+                               CURRENT_TIMESTAMP(), 'INSERT'
+                        FROM `{project_id}.{dataset_staging}.{table_staging}` S
+                    '''
+                    bq_client.query(insert_trunc_sql).result()
+                    merge_time = time.time() - merge_start
+                    print(f"\u2705 TRUNCATE+INSERT ejecutado: {dataset_final}.{table_final} reemplazado en {merge_time:.1f}s")
+                    return (True, merge_time, None)
+                except Exception as trunc_err:
+                    merge_time = time.time() - merge_start
+                    err = clean_bq_error(trunc_err)
+                    print(f"\u274c [execute_merge_or_insert] TRUNCATE+INSERT fall\u00f3 para {dataset_final}.{table_final}: {err}")
+                    return (False, merge_time, err)
 
-        # Construir UPDATE SET con las columnas seguras
-        update_set = ', '.join([f'T.{col} = S.{col}' for col in safe_cols])
+        # Construir UPDATE SET: usar SAFE_CAST para columnas con tipo incompatible
+        type_mismatches = type_mismatches or {}
+        def _col_update_expr(col):
+            if col in type_mismatches:
+                final_type = type_mismatches[col]['final']
+                BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
+                final_type_sql = BQ_ALIASES.get(final_type, final_type)
+                return f'T.{col} = SAFE_CAST(S.{col} AS {final_type_sql})'
+            return f'T.{col} = S.{col}'
+        update_set = ', '.join([_col_update_expr(col) for col in safe_cols])
         
         # Para INSERT, usar columnas seguras + el id
         cols_list = ['id'] + safe_cols

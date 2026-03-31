@@ -295,7 +295,7 @@ def process_company(row):
         
         # Verificar y corregir incompatibilidades de esquema (tipos de datos)
         print(f"🔍 Verificando compatibilidad de esquemas entre staging y final...")
-        needs_correction, corrections_made, alignment_error = align_schemas_before_merge(
+        needs_correction, corrections_made, alignment_error, type_mismatches = align_schemas_before_merge(
             bq_client=bq_client,
             staging_table=staging_table,
             final_table=final_table,
@@ -333,7 +333,8 @@ def process_company(row):
             log_event_callback=log_event_bq_all,
             company_id=company_id,
             company_name=company_name,
-            endpoint_name=endpoint_name
+            endpoint_name=endpoint_name,
+            type_mismatches=type_mismatches
         )
         
         if merge_success:
