@@ -746,13 +746,16 @@ def validate_json_file(file_path, max_lines_to_check=1000):
         return (False, f"Error validando archivo JSON: {str(e)}", None)
 
 def clean_bq_error(e):
-    """Limpia el mensaje de error de BigQuery quitando el Location y Job ID para mejorar los logs."""
+    """Limpia el mensaje de error de BigQuery quitando Location, Job ID y URL verbose."""
     error_str = str(e)
-    if 'Location:' in error_str:
-        error_str = error_str.split('\n\nLocation:')[0]
-    elif '\nLocation:' in error_str:
-        error_str = error_str.split('\nLocation:')[0]
-    return error_str
+    # Cortar en el primer salto de párrafo antes de Location:
+    for separator in ['\n\nLocation:', '\nLocation:', 'Location:']:
+        if separator in error_str:
+            error_str = error_str.split(separator)[0].rstrip()
+            break
+    # También quitar líneas sueltas de Job ID si quedaron
+    lines = [l for l in error_str.splitlines() if not l.strip().startswith('Job ID:')]
+    return '\n'.join(lines).rstrip()
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
     storage_client = storage.Client(project=project_id)
@@ -854,21 +857,23 @@ def align_schemas_before_merge(bq_client, staging_table, final_table, project_id
         try:
             # Para tipos simples (no STRUCT), usar ALTER TABLE para cambiar el tipo
             if staging_field.field_type != 'STRUCT':
-                # BigQuery no permite cambiar tipos directamente con ALTER TABLE
-                # Necesitamos usar una estrategia diferente:
-                # 1. Agregar columna temporal con el tipo correcto
-                # 2. Copiar datos con CAST
-                # 3. Eliminar columna vieja
-                # 4. Renombrar columna temporal
+                # BigQuery NO permite cambiar tipos que implican pérdida de precisión (ej: STRING → INTEGER).
+                # Regla: si la tabla final tiene un tipo más amplio (STRING), lo respetamos.
+                # Si la tabla final tiene un tipo más estrecho (INTEGER) y el staging trae STRING, lo actualizamos.
+                NUMERIC_TYPES = {'INTEGER', 'INT64', 'FLOAT', 'FLOAT64', 'NUMERIC', 'BIGNUMERIC'}
+                final_is_string = final_field.field_type == 'STRING'
+                staging_is_numeric = staging_field.field_type in NUMERIC_TYPES
                 
-                # Simplificación: actualizar el esquema directamente (solo funciona si la tabla está vacía o BigQuery lo permite)
-                # Si la tabla tiene datos, necesitamos una estrategia más compleja
+                if final_is_string and staging_is_numeric:
+                    # Final=STRING, staging=INTEGER/FLOAT: STRING ya contiene todo, NO intentar cambiar.
+                    # El MERGE usará CAST implícito o la intersección segura de columnas.
+                    print(f"  ⚠️ [align_schemas_before_merge] Campo {field_name}: final={old_type} es más amplio que staging={new_type}. Manteniendo STRING.")
+                    continue  # No cambiar nada, seguir con el siguiente campo
                 
-                # Intentar actualizar el esquema directamente
+                # Para otros casos (ej: INTEGER → STRING), intentar actualizar
                 updated_schema = []
                 for field in final_schema:
                     if field.name == field_name:
-                        # Reemplazar con el campo de staging
                         updated_schema.append(staging_field)
                     else:
                         updated_schema.append(field)
@@ -1509,6 +1514,28 @@ def execute_merge_or_insert(
         # INTERSECCIÓN SEGURA: Solo actualizar e insertar columnas que REALMENTE existen en ambas tablas
         safe_cols = sorted(list(staging_cols.intersection(final_cols_actual)))
         
+        # Verificar que 'id' existe en la tabla final (prerequisito del MERGE)
+        final_has_id = any(col.name == 'id' for col in final_table_refresh.schema)
+        if not final_has_id:
+            # Intentar agregarlo vía ALTER TABLE
+            staging_id_field = next((col for col in staging_schema if col.name == 'id'), None)
+            if staging_id_field:
+                try:
+                    id_sql_type = _schema_field_to_sql(staging_id_field)
+                    alter_id_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {id_sql_type}"
+                    bq_client.query(alter_id_sql).result()
+                    print(f"  ✨ Campo 'id' agregado a {dataset_final}.{table_final} para habilitar MERGE")
+                    final_has_id = True
+                except Exception as alter_id_err:
+                    print(f"⚠️ [execute_merge_or_insert] No se pudo agregar 'id' a {dataset_final}.{table_final}: {clean_bq_error(alter_id_err)}")
+            
+            if not final_has_id:
+                # Sin 'id' no hay MERGE posible — usar INSERT directo (WRITE_TRUNCATE es muy destructivo,
+                # así que solo insertamos los nuevos registros sin borrar los existentes)
+                print(f"⚠️ [execute_merge_or_insert] Tabla {dataset_final}.{table_final} no tiene 'id'. No es posible MERGE incremental.")
+                merge_time = time.time() - merge_start
+                return (False, merge_time, f"Tabla {table_final} no tiene campo 'id' requerido para MERGE. Revisar origen de la tabla.")
+
         # Construir UPDATE SET con las columnas seguras
         update_set = ', '.join([f'T.{col} = S.{col}' for col in safe_cols])
         

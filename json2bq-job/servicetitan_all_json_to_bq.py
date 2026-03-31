@@ -305,7 +305,7 @@ def process_company(row):
         )
         
         if alignment_error:
-            print(f"❌ [process_company] Error alineando esquemas: {alignment_error}")
+            print(f"❌ [process_company] Error alineando esquemas: {clean_bq_error(alignment_error)}")
             log_event_bq_all(
                 company_id=company_id,
                 company_name=company_name,
@@ -342,7 +342,7 @@ def process_company(row):
             endpoint_time = time.time() - endpoint_start_time
             print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
         else:
-            print(f"❌ [process_company] Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
+            print(f"❌ [process_company] Error en MERGE/INSERT o borrado de staging: {clean_bq_error(merge_error_msg)} (la tabla staging NO se borra para depuración)")
             endpoint_time = time.time() - endpoint_start_time
             print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
         
