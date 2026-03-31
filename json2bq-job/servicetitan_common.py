@@ -655,6 +655,15 @@ def transform_item(item, array_fields, stringify_fields=None):
             new_item[snake_key] = []
         else:
             new_item[snake_key] = fixed_value
+            
+    # CRÍTICO: Si la fila no tenía la llave en lo absoluto, BigQuery lo interpretará como NULL.
+    # Debemos inyectar explicitamente un [] para los campos que sabemos que deben ser arrays.
+    if array_fields:
+        for array_field in array_fields:
+            # Solo para campos de nivel superior
+            if '.' not in array_field and array_field not in new_item:
+                new_item[array_field] = []
+                
     return new_item
 
 def validate_json_file(file_path, max_lines_to_check=1000):
