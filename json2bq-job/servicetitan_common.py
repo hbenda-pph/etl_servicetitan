@@ -982,6 +982,10 @@ def load_json_to_staging_with_error_handling(
                 job_config=job_config
             )
         load_job.result()
+        
+        load_time = time.time() - load_start
+        print(f"✅ Carga a staging completada en {load_time:.1f}s")
+        return (True, load_time, None)
     except Exception as e:
         import re
         error_msg_raw = str(e)
