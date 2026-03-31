@@ -770,7 +770,13 @@ def _schema_field_to_sql(field):
         fields_sql = ', '.join([_schema_field_to_sql(f) for f in field.fields])
         struct_def = f"STRUCT<{fields_sql}>"
     else:
-        struct_def = field_type
+        # Mapear tipos que BQ API devuelve pero que ALTER TABLE no acepta literalmente
+        BQ_TYPE_MAP = {
+            'FLOAT': 'FLOAT64',
+            'INTEGER': 'INT64',
+            'BOOLEAN': 'BOOL',
+        }
+        struct_def = BQ_TYPE_MAP.get(field_type, field_type)
     
     # Agregar mode (NULLABLE, REQUIRED, REPEATED)
     mode = field.mode or 'NULLABLE'
@@ -1425,16 +1431,22 @@ def execute_merge_or_insert(
             # Agregar cada nueva columna usando ALTER TABLE
             # BigQuery requiere una sentencia ALTER TABLE por columna (secuencial)
             # Esto evita el bug de BigQuery donde update_table borra campos anidados
+            added_cols = []
+            failed_cols = []
             for new_field in new_schema_fields:
                 try:
                     field_def = _schema_field_to_sql(new_field)
                     alter_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {field_def}"
                     bq_client.query(alter_sql).result()
                     print(f"  ✨ Campo {new_field.name} agregado a {dataset_final}.{table_final}")
+                    added_cols.append(new_field.name)
                 except Exception as e:
-                    print(f"  ⚠️ [execute_merge_or_insert] No se pudo agregar {new_field.name} con ALTER TABLE: {clean_bq_error(e)}")
-                    print(f"  ⚠️ [execute_merge_or_insert] Continuando sin agregar esta columna. Se ignorará en el MERGE.")
-            print(f"✅ Esquema actualizado. Columnas agregadas: {sorted(new_cols)}")
+                    print(f"  ⚠️ [execute_merge_or_insert] No se pudo agregar {new_field.name}: {clean_bq_error(e)}")
+                    failed_cols.append(new_field.name)
+            if added_cols:
+                print(f"✅ Columnas agregadas al esquema: {sorted(added_cols)}")
+            if failed_cols:
+                print(f"⚠️ [execute_merge_or_insert] Columnas que no se pudieron agregar (se ignorarán en MERGE): {sorted(failed_cols)}")
         except Exception as schema_error:
             print(f"⚠️ [execute_merge_or_insert] Error al actualizar esquema: {str(schema_error)}")
     
