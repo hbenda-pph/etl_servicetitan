@@ -1065,57 +1065,40 @@ def load_json_to_staging_with_error_handling(
         if clean_errors:
             error_msg = "\n".join([f"  • {msg}" for msg in clean_errors])
             # Imprimir al usuario de manera limpia
-            print(f"❌ [load_json_to_staging_with_error_handling] Error de BigQuery detectado:")
+            print(f"⚠️ [load_json_to_staging_with_error_handling] Error BQ detectado (intentando auto-corrección):")
             print(f"{error_msg}{problematic_row_preview}")
         
-        # Intentar extraer campo REPEATED del mensaje de error
-        # Formato 1: "Field: permissions; Value: NULL"
+        # Detectar campo problemático. PRIORIDAD: repeated > nested > type_mismatch
+        # "too many errors" es un envoltorio — ya contiene uno de los formatos internos.
         match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
-        
-        # Formato 2: "JSON object specified for non-record field: items.serialNumbers"
         match2 = re.search(r'non-record field:\s*([\w.]+)', error_msg, re.IGNORECASE)
-        
-        # Formato 3: Error de tipo de dato - puede estar en múltiples niveles del mensaje
-        # "Could not convert value 'string_value: "S72-85922420"' to integer. Field: job_number"
-        # También puede estar en: "JSON parsing error... Could not convert... Field: job_number"
         match3 = re.search(r'Could not convert.*?Field:\s*([\w_]+)', error_msg, re.IGNORECASE | re.DOTALL)
-        
-        # Formato 4: "JSON table encountered too many errors" - buscar en los detalles anidados
-        # El error real puede estar en los detalles del error, buscar cualquier "Field: X"
-        # El mensaje puede tener múltiples niveles: "JSON table encountered too many errors... JSON parsing error... Field: job_number"
-        if ('JSON table encountered too many errors' in error_msg or 'JSON parsing error' in error_msg) and not match3:
-            # Buscar el campo problemático en el mensaje completo (puede estar en cualquier parte)
-            # Buscar todos los campos mencionados y usar el último (más probable que sea el problemático)
-            all_fields = re.findall(r'Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
-            if all_fields:
-                # Usar el último campo encontrado (generalmente el más específico)
-                problematic_field = all_fields[-1]
-                needs_fix = True
-                fix_type = 'type_mismatch'
-                print(f"🔍 Error de tipo de dato detectado (desde errores anidados): {problematic_field}")
-                print(f"🔧 Corrigiendo esquema: convirtiendo campo {problematic_field} a STRING")
-                match3 = type('Match', (), {'group': lambda self, n: problematic_field})()  # Crear objeto match simulado
-        
+
+        # Fallback: buscar campo en mensajes de "too many errors" cuando no hubo match directo
+        if not match and not match2 and not match3:
+            if 'JSON table encountered too many errors' in error_msg or 'JSON parsing error' in error_msg:
+                all_fields = re.findall(r'Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
+                if all_fields:
+                    problematic_field = all_fields[-1]
+                    needs_fix = True
+                    fix_type = 'repeated'
+
         if match:
             problematic_field = match.group(1)
             needs_fix = True
             fix_type = 'repeated'
-            print(f"🔍 Campo REPEATED detectado del error: {problematic_field}")
-            print(f"🧹 Limpiando datos: convirtiendo NULL a [] para campo {problematic_field}")
         elif match2:
             problematic_field = match2.group(1)
             needs_fix = True
             fix_type = 'nested'
-            print(f"🔍 Campo anidado con tipo incorrecto detectado: {problematic_field}")
-            print(f"🧹 Limpiando datos: corrigiendo campo {problematic_field} que viene como objeto pero debería ser array")
         elif match3:
             problematic_field = match3.group(1)
             needs_fix = True
             fix_type = 'type_mismatch'
-            print(f"🔍 Error de tipo de dato detectado: {problematic_field}")
-            print(f"🔧 Corrigiendo esquema: convirtiendo campo {problematic_field} a STRING")
-        
+
         if needs_fix and problematic_field:
+            strategy_labels = {'repeated': 'stringify', 'nested': 'stringify', 'type_mismatch': 'corregir tipo a STRING'}
+            print(f"🔧 Auto-corrección: campo '{problematic_field}' | estrategia: {strategy_labels.get(fix_type, fix_type)}")
             if fix_type == 'type_mismatch':
                 # Error de tipo de dato: corregir esquema
                 # Estrategia simplificada: eliminar tabla staging y recrearla con esquema corregido
