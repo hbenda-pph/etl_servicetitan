@@ -62,34 +62,25 @@ fi
 echo ""
 echo "🔨 PASO 1: BUILD (Creando imagen Docker)"
 echo "=========================================="
-echo "📝 Usando Dockerfile.inbox para build..."
+echo "📋 Usando Dockerfile.inbox para build..."
+# Crear config temporal de Cloud Build apuntando a Dockerfile.inbox
+cat > /tmp/cloudbuild_inbox.yaml <<BUILDEOF
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-f', 'Dockerfile.inbox', '-t', '${IMAGE_TAG}', '.']
+images: ['${IMAGE_TAG}']
+BUILDEOF
 
-# Guardar Dockerfile original si existe
-if [ -f "Dockerfile" ]; then
-    cp Dockerfile Dockerfile.original.backup
-fi
-
-# Usar Dockerfile.inbox para el build
-cp Dockerfile.inbox Dockerfile
-gcloud builds submit --tag ${IMAGE_TAG}
-
-# Restaurar Dockerfile original si existía
-if [ -f "Dockerfile.original.backup" ]; then
-    mv Dockerfile.original.backup Dockerfile
-else
-    rm -f Dockerfile
-fi
+gcloud builds submit --config /tmp/cloudbuild_inbox.yaml .
 
 if [ $? -eq 0 ]; then
     echo "✅ Build exitoso!"
 else
     echo "❌ Error en el build"
-    # Limpiar en caso de error
-    if [ -f "Dockerfile.original.backup" ]; then
-        mv Dockerfile.original.backup Dockerfile
-    fi
+    rm -f /tmp/cloudbuild_inbox.yaml
     exit 1
 fi
+rm -f /tmp/cloudbuild_inbox.yaml
 
 echo ""
 echo "🚀 PASO 2: DEPLOY (Creando/Actualizando Cloud Run Job)"
