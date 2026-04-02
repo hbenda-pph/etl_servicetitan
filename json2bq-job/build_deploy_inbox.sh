@@ -22,7 +22,7 @@ CPU="1"
 MAX_RETRIES="1"
 TASK_TIMEOUT="1800"
 SCHEDULE_NAME="etl-inbox-json2bq-schedule"
-SCHEDULE_CRON="0 */6 * * *"
+SCHEDULE_CRON="10 */6 * * *"
 
 echo "🚀 Iniciando Build & Deploy para ETL-INBOX-JSON2BQ-JOB"
 echo "======================================================="
