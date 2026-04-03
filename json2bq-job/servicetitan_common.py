@@ -1094,6 +1094,31 @@ def load_json_to_staging_with_error_handling(
                     sample_table_ref = bq_client.dataset(dataset_staging).table(f"{table_staging}_sample_schema")
                     
                     try:
+                        # Helper recursivo para buscar y reemplazar un campo (incluso dentro de RECORD/STRUCT)
+                        def _replace_field_recurse(schema_fields, target_name):
+                            updated = []
+                            found = False
+                            for f in schema_fields:
+                                if f.field_type in ('RECORD', 'STRUCT'):
+                                    sub_updated, sub_found = _replace_field_recurse(f.fields, target_name)
+                                    if sub_found:
+                                        found = True
+                                        updated.append(bigquery.SchemaField(
+                                            name=f.name, field_type=f.field_type, mode=f.mode,
+                                            description=f.description, fields=sub_updated
+                                        ))
+                                    else:
+                                        updated.append(f)
+                                elif f.name == target_name:
+                                    found = True
+                                    updated.append(bigquery.SchemaField(
+                                        name=f.name, field_type='STRING', mode=f.mode,
+                                        description=f.description
+                                    ))
+                                else:
+                                    updated.append(f)
+                            return updated, found
+
                         # Crear muestra pequeña (primeras 100 líneas) para inferir esquema
                         with open(temp_fixed, 'r', encoding='utf-8') as f_in:
                             with open(sample_file, 'w', encoding='utf-8') as f_out:
@@ -1121,22 +1146,14 @@ def load_json_to_staging_with_error_handling(
                         # Obtener esquema inferido
                         sample_table = bq_client.get_table(sample_table_ref)
                         if sample_table and sample_table.schema:
-                            # Construir esquema corregido: reemplazar campo problemático con STRING
-                            updated_schema = []
-                            field_found = False
-                            for field in sample_table.schema:
-                                if field.name == problematic_field:
-                                    # Reemplazar con STRING
-                                    updated_schema.append(corrected_field)
-                                    field_found = True
-                                else:
-                                    updated_schema.append(field)
+                            # Construir esquema corregido de forma recursiva
+                            updated_schema, field_found = _replace_field_recurse(sample_table.schema, problematic_field)
                             
                             if not field_found:
-                                # Campo no estaba en el esquema inferido, agregarlo
+                                # Campo no estaba en el esquema inferido, agregarlo al nivel superior
                                 updated_schema.append(corrected_field)
                             
-                            print(f"✅ Esquema inferido y corregido: campo {problematic_field} forzado a STRING")
+                            print(f"✅ Esquema inferido y corregido: campo {problematic_field} forzado a STRING (nested support)")
                         else:
                             # Si no se pudo inferir, usar solo el campo corregido
                             updated_schema = [corrected_field]
@@ -1233,15 +1250,9 @@ def load_json_to_staging_with_error_handling(
                                         field_type='STRING',
                                         mode='NULLABLE'
                                     )
-                                    # Actualizar esquema
-                                    new_schema = []
-                                    field_replaced = False
-                                    for field in current_schema:
-                                        if field.name == another_field:
-                                            new_schema.append(another_corrected_field)
-                                            field_replaced = True
-                                        else:
-                                            new_schema.append(field)
+                                    # Actualizar esquema recursivamente
+                                    new_schema, field_replaced = _replace_field_recurse(current_schema, another_field)
+                                    
                                     if not field_replaced:
                                         new_schema.append(another_corrected_field)
                                     
