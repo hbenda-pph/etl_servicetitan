@@ -124,19 +124,18 @@ def process_company(row):
         try:
             blob = bucket.blob(json_filename)
             if not blob.exists():
-                # log_event_bq( [COMENTADO]
-                #     company_id=company_id,
-                #     company_name=company_name,
-                #     project_id=project_id,
-                #     endpoint=endpoint_name,
-                #     event_type="WARNING",
-                #     event_title="Archivo no encontrado",
-                #     event_message=f"Archivo {json_filename} no encontrado en bucket {bucket_name}"
-                # )
                 print(f"⚠️ [process_company] Archivo no encontrado: {json_filename} en bucket {bucket_name}")
                 continue
             blob.download_to_filename(temp_json)
             print(f"⬇️  Descargado {json_filename} de gs://{bucket_name}")
+            
+            # Validar JSON inmediatamente después de descargar
+            print(f"🔍 Validando estructura JSON...")
+            is_valid, validation_error, json_type = validate_json_file(temp_json)
+            if not is_valid:
+                print(f"❌ [process_company] ARCHIVO JSON MAL FORMADO: {validation_error}")
+                continue
+            print(f"✅ JSON válido (tipo: {json_type})")
         except Exception as e:
             # log_event_bq( [COMENTADO]
             #     company_id=company_id,
@@ -185,6 +184,12 @@ def process_company(row):
             dataset.location = "US"
             bq_client.create_dataset(dataset)
             print(f"🆕 Dataset {dataset_staging} creado en proyecto {project_id}")
+            
+        # Limpiar staging al inicio para evitar conflictos de esquemas
+        try:
+            bq_client.delete_table(table_ref_staging, not_found_ok=True)
+        except Exception:
+            pass
         
         # Usar la función común de carga que contiene todas las correcciones heurísticas 
         # y generación de vistas previas de errores JSON para logs
@@ -247,7 +252,7 @@ def process_company(row):
         
         # Verificar y corregir incompatibilidades de esquema (tipos incompatibles)
         print(f"🔍 Verificando compatibilidad de esquemas entre staging y final...")
-        needs_correction, corrections_made, alignment_error = align_schemas_before_merge(
+        needs_correction, corrections_made, alignment_error, type_mismatches = align_schemas_before_merge(
             bq_client=bq_client,
             staging_table=staging_table,
             final_table=final_table,
@@ -276,7 +281,8 @@ def process_company(row):
             log_event_callback=None, # INBOX usa logs comentados actualmente
             company_id=company_id,
             company_name=company_name,
-            endpoint_name=endpoint_name
+            endpoint_name=endpoint_name,
+            type_mismatches=type_mismatches
         )
         
         if merge_success:
