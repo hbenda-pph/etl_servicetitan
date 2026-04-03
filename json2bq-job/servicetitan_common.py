@@ -978,7 +978,7 @@ def load_json_to_staging_with_error_handling(
     except Exception as e:
         import re
         error_msg_raw = str(e)
-        error_msg = error_msg_raw
+        error_msg = clean_bq_error(error_msg_raw)
         problematic_field = None
         needs_fix = False
         fix_type = None  # 'repeated', 'nested', 'type_mismatch'
@@ -1230,7 +1230,7 @@ def load_json_to_staging_with_error_handling(
                             return (True, load_time, None)
                             
                         except Exception as load_error:
-                            error_msg = str(load_error)
+                            error_msg = clean_bq_error(load_error)
                             
                             # Intentar obtener detalles del error del job
                             another_field = None
@@ -1364,7 +1364,7 @@ def load_json_to_staging_with_error_handling(
                     print(f"✅ Cargado a tabla staging exitosamente después de limpieza de datos")
                     return (True, load_time, None)
                 except Exception as retry_error:
-                    error_msg = f"Error reintentando carga tras limpieza de datos para {problematic_field}: {str(retry_error)}"
+                    error_msg = f"Error reintentando carga tras limpieza de datos para {problematic_field}: {clean_bq_error(retry_error)}"
                     try:
                         if 'retry_job' in locals() and hasattr(retry_job, 'errors') and retry_job.errors:
                             error_details = json.dumps(retry_job.errors, indent=2)
@@ -1494,7 +1494,7 @@ def execute_merge_or_insert(
             print(f"✅ INSERT directo ejecutado: {dataset_final}.{table_final} poblado con {rows_inserted:,} filas en {merge_time:.1f}s")
             return (True, merge_time, None)
         except Exception as e:
-            error_msg = str(e)
+            error_msg = clean_bq_error(e)
             merge_time = time.time() - merge_start
             print(f"❌ [execute_merge_or_insert] INSERT directo falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
             if log_event_callback:
@@ -1623,7 +1623,7 @@ def execute_merge_or_insert(
             print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
             return (True, merge_time, None)
         except Exception as e:
-            error_msg = str(e)
+            error_msg = clean_bq_error(e)
             merge_time = time.time() - merge_start
             print(f"❌ [execute_merge_or_insert] MERGE con Soft Delete falló para {dataset_final}.{table_final} después de {merge_time:.1f}s: {error_msg}")
             if log_event_callback:
