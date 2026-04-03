@@ -103,6 +103,7 @@ def process_company(row):
     bucket = storage_client.bucket(bucket_name)
     
     for endpoint_name, table_name in ENDPOINTS:
+        endpoint_start_time = time.time()
         # Usar table_name directamente desde metadata para archivos JSON y tablas
         json_filename = f"servicetitan_{table_name}.json"
         temp_json = f"/tmp/{project_id}_{table_name}.json"
@@ -187,6 +188,7 @@ def process_company(row):
         
         # Usar la función común de carga que contiene todas las correcciones heurísticas 
         # y generación de vistas previas de errores JSON para logs
+        load_start = time.time()
         success, load_time, error_msg = load_json_to_staging_with_error_handling(
             bq_client=bq_client,
             temp_fixed=temp_fixed,
@@ -197,7 +199,7 @@ def process_company(row):
             table_staging=table_staging,
             dataset_staging=dataset_staging,
             load_start=load_start,
-            log_event_callback=log_event_bq_inbox,
+            log_event_callback=None,
             company_id=company_id,
             company_name=company_name,
             endpoint_name=endpoint_name
