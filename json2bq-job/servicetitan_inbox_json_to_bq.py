@@ -84,6 +84,7 @@ def process_company(row):
     company_name = row.company_name
     # Cada compañía INBOX tiene su propio proyecto temporal (Estrategia A)
     project_id = row.company_project_id
+    company_start_time = time.time()
     if not project_id:
         raise ValueError(f"company_project_id vacío para company_id={company_id}. Primero crea el proyecto INBOX por compañía.")
     
@@ -104,6 +105,9 @@ def process_company(row):
     
     for endpoint_name, table_name in ENDPOINTS:
         endpoint_start_time = time.time()
+        
+        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) company {company_id}")
+        
         # Usar table_name directamente desde metadata para archivos JSON y tablas
         json_filename = f"servicetitan_{table_name}.json"
         temp_json = f"/tmp/{project_id}_{table_name}.json"
@@ -122,18 +126,30 @@ def process_company(row):
         
         # Descargar archivo JSON del bucket
         try:
+            download_start = time.time()
             blob = bucket.blob(json_filename)
             if not blob.exists():
                 print(f"⚠️ [process_company] Archivo no encontrado: {json_filename} en bucket {bucket_name}")
+                merge_time = 0.0
+                print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: archivo {json_filename} no encontrado en bucket")
+                endpoint_time = time.time() - endpoint_start_time
+                print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                 continue
             blob.download_to_filename(temp_json)
-            print(f"⬇️  Descargado {json_filename} de gs://{bucket_name}")
+            download_time = time.time() - download_start
+            file_size_mb = os.path.getsize(temp_json) / (1024 * 1024)
+            print(f"⬇️  Descargado {json_filename} ({file_size_mb:.2f} MB) en {download_time:.1f}s")
             
             # Validar JSON inmediatamente después de descargar
             print(f"🔍 Validando estructura JSON...")
             is_valid, validation_error, json_type = validate_json_file(temp_json)
             if not is_valid:
                 print(f"❌ [process_company] ARCHIVO JSON MAL FORMADO: {validation_error}")
+                print(f"❌ [process_company] El archivo {json_filename} está corrupto o mal generado por el job anterior (st2json)")
+                merge_time = 0.0
+                print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: archivo JSON mal formado")
+                endpoint_time = time.time() - endpoint_start_time
+                print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
                 continue
             print(f"✅ JSON válido (tipo: {json_type})")
         except Exception as e:
@@ -147,12 +163,22 @@ def process_company(row):
             #     event_message=f"Error descargando {json_filename}: {str(e)}"
             # )
             print(f"❌ [process_company] Error descargando {json_filename}: {str(e)}")
+            merge_time = 0.0
+            print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: error descargando archivo - {str(e)}")
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
         # Transformar a newline-delimited y snake_case (primera pasada)
         try:
+            transform_start = time.time()
+            file_size_mb = os.path.getsize(temp_json) / (1024 * 1024)
+            if file_size_mb > 100:
+                print(f"🔄 Transformando archivo grande ({file_size_mb:.2f} MB) a newline-delimited y snake_case (esto puede tomar varios minutos)...")
             fix_json_format(temp_json, temp_fixed)
-            print(f"🔄 Transformado a newline-delimited y snake_case: {temp_fixed}")
+            transform_time = time.time() - transform_start
+            if file_size_mb <= 100:
+                print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
         except Exception as e:
             # log_event_bq( [COMENTADO]
             #     company_id=company_id,
@@ -164,6 +190,10 @@ def process_company(row):
             #     event_message=f"Error transformando {json_filename}: {str(e)}"
             # )
             print(f"❌ [process_company] Error transformando {json_filename}: {str(e)}")
+            merge_time = 0.0
+            print(f"❌ [process_company] MERGE con Soft Delete no ejecutado para bronze.{table_name}: error transformando archivo - {str(e)}")
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
         # Cargar a tabla staging en BigQuery
@@ -287,7 +317,8 @@ def process_company(row):
         
         if merge_success:
             bq_client.delete_table(table_ref_staging, not_found_ok=True)
-            print(f"🗑️  Tabla staging {dataset_staging}.{table_staging} eliminada.")
+            endpoint_time = time.time() - endpoint_start_time
+            print(f"✅ Endpoint {endpoint_name} completado en {endpoint_time:.1f}s total")
         else:
             print(f"❌ [process_company] Error en MERGE/INSERT o borrado de staging: {merge_error_msg} (la tabla staging NO se borra para depuración)")
         
@@ -298,6 +329,12 @@ def process_company(row):
         except Exception:
             pass
     
+    # Resumen de tiempo por compañía
+    company_elapsed = time.time() - company_start_time
+    print(f"\n{'='*80}")
+    print(f"✅ Compañía INBOX {company_name} (ID: {company_id}) completada en {company_elapsed:.1f} segundos ({company_elapsed/60:.1f} minutos)")
+    print(f"{'='*80}")
+
     # Log de fin de procesamiento de compañía [COMENTADO]
     # log_event_bq(
     #     company_id=company_id,
