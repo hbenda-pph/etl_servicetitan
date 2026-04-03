@@ -747,14 +747,27 @@ def validate_json_file(file_path, max_lines_to_check=1000):
 
 def clean_bq_error(e):
     """Limpia el mensaje de error de BigQuery quitando Location, Job ID y URL verbose."""
+    import re
     error_str = str(e)
+    # Suprimir la URL gigante de la API usando regex
+    error_str = re.sub(r'(?:GET|POST|PUT|DELETE)\s+https?://[^\s]+:\s*', '', error_str)
+    
     # Cortar en el primer salto de párrafo antes de Location:
     for separator in ['\n\nLocation:', '\nLocation:', 'Location:']:
         if separator in error_str:
             error_str = error_str.split(separator)[0].rstrip()
             break
-    # También quitar líneas sueltas de Job ID si quedaron
-    lines = [l for l in error_str.splitlines() if not l.strip().startswith('Job ID:')]
+            
+    # Quitar cualquier línea que contenga "Job ID:" o "Location:" para estar súper seguros
+    lines = []
+    for l in error_str.splitlines():
+        if l.strip().startswith('Job ID:') or l.strip().startswith('Location:'):
+            continue
+        # Limpiar si viene concatenado en la misma linea como "reason: invalidQuery, location: query"
+        l = re.sub(r',\s*location:\s*[\w]+', '', l)
+        l = re.sub(r';\s*reason:\s*[\w]+', '', l)
+        if l.strip():
+            lines.append(l)
     return '\n'.join(lines).rstrip()
 
 def upload_to_bucket(bucket_name, project_id, local_file, dest_blob_name):
@@ -1034,15 +1047,20 @@ def load_json_to_staging_with_error_handling(
             # Imprimir al usuario de manera limpia
             print(f"⚠️ [load_json_to_staging_with_error_handling] Error BQ detectado (intentando auto-corrección):")
             print(f"{error_msg}{problematic_row_preview}")
+            
+        # Manejo de archivo JSON sin esquema (totalmente vacío)
+        if 'Schema has no fields' in error_msg:
+            return (False, time.time() - load_start, "Archivo JSON vacío o sin campos válidos (Schema has no fields)")
         
         # Detectar campo problemático. PRIORIDAD: repeated > nested > type_mismatch
         # "too many errors" es un envoltorio — ya contiene uno de los formatos internos.
         match = re.search(r'Field:\s*(\w+);\s*Value:\s*NULL', error_msg, re.IGNORECASE)
         match2 = re.search(r'non-record field:\s*([\w.]+)', error_msg, re.IGNORECASE)
         match3 = re.search(r'Could not convert.*?Field:\s*([\w_]+)', error_msg, re.IGNORECASE | re.DOTALL)
+        match4 = re.search(r'Invalid (?:date|datetime|time|timestamp).*?Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
 
         # Fallback: buscar campo en mensajes de "too many errors" cuando no hubo match directo
-        if not match and not match2 and not match3:
+        if not match and not match2 and not match3 and not match4:
             if 'JSON table encountered too many errors' in error_msg or 'JSON parsing error' in error_msg:
                 all_fields = re.findall(r'Field:\s*([\w_]+)', error_msg, re.IGNORECASE)
                 if all_fields:
@@ -1060,6 +1078,10 @@ def load_json_to_staging_with_error_handling(
             fix_type = 'nested'
         elif match3:
             problematic_field = match3.group(1)
+            needs_fix = True
+            fix_type = 'type_mismatch'
+        elif match4:
+            problematic_field = match4.group(1)
             needs_fix = True
             fix_type = 'type_mismatch'
 
@@ -1429,11 +1451,27 @@ def execute_merge_or_insert(
         # Primera carga: usar INSERT directo (más eficiente y evita problemas de MERGE)
         print(f"📥 Primera carga detectada (tabla vacía). Usando INSERT directo en lugar de MERGE...")
         
-        # Para INSERT, usar todas las columnas de staging explícitamente + 'id'
-        cols_list = ['id'] + sorted(list(staging_cols))
+        # Para INSERT, usar todas las columnas de staging explícitamente, pero sin forzar 'id' si no existe
+        staging_has_id = any(col.name == 'id' for col in staging_schema)
+        if staging_has_id:
+            cols_list = ['id'] + sorted(list(staging_cols))
+        else:
+            cols_list = sorted(list(staging_cols))
+            print(f"⚠️ [execute_merge_or_insert] Tabla staging no tiene columna 'id', se omitirá en el INSERT.")
         
         insert_cols_with_etl = cols_list + ['_etl_synced', '_etl_operation']
-        insert_values_with_etl = [f'S.{col}' for col in cols_list] + ['CURRENT_TIMESTAMP()', "'INSERT'"]
+        
+        # Usar SAFE_CAST si hay mismatches definidos (rara vez pero posible en primer load si final fue precreado)
+        type_mismatches = type_mismatches or {}
+        def _col_insert_expr(col):
+            if col in type_mismatches:
+                final_type = type_mismatches[col]['final']
+                BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
+                final_type_sql = BQ_ALIASES.get(final_type, final_type)
+                return f'SAFE_CAST(S.{col} AS {final_type_sql})'
+            return f'S.{col}'
+            
+        insert_values_with_etl = [_col_insert_expr(col) for col in cols_list] + ['CURRENT_TIMESTAMP()', "'INSERT'"]
         
         insert_sql = f'''
             INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
@@ -1481,10 +1519,12 @@ def execute_merge_or_insert(
         # INTERSECCIÓN SEGURA: Solo actualizar e insertar columnas que REALMENTE existen en ambas tablas
         safe_cols = sorted(list(staging_cols.intersection(final_cols_actual)))
         
-        # Verificar que 'id' existe en la tabla final (prerequisito del MERGE)
+        # Verificar que 'id' existe en la tabla final Y EN STAGING (prerequisito del MERGE)
         final_has_id = any(col.name == 'id' for col in final_table_refresh.schema)
-        if not final_has_id:
-            # Intentar agregarlo vía ALTER TABLE
+        staging_has_id = any(col.name == 'id' for col in staging_schema)
+        
+        if not final_has_id and staging_has_id:
+            # Intentar agregarlo vía ALTER TABLE a la tabla final si staging sí lo tiene
             staging_id_field = next((col for col in staging_schema if col.name == 'id'), None)
             if staging_id_field:
                 try:
@@ -1496,31 +1536,44 @@ def execute_merge_or_insert(
                 except Exception as alter_id_err:
                     print(f"⚠️ [execute_merge_or_insert] No se pudo agregar 'id' a {dataset_final}.{table_final}: {clean_bq_error(alter_id_err)}")
             
-            if not final_has_id:
-                # Sin 'id': hacer TRUNCATE + INSERT (reemplazo total). Apropiado para tablas de settings.
-                print(f"\u26a0\ufe0f [execute_merge_or_insert] Tabla {dataset_final}.{table_final} no tiene 'id'. Usando TRUNCATE + INSERT (reemplazo total).")
-                try:
-                    truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
-                    bq_client.query(truncate_sql).result()
-                    # Columnas comunes (seguras) sin 'id'
-                    trunc_cols = safe_cols
-                    insert_trunc_sql = f'''
-                        INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
-                            {', '.join(trunc_cols)}, _etl_synced, _etl_operation
-                        )
-                        SELECT {', '.join([f'S.{c}' for c in trunc_cols])},
-                               CURRENT_TIMESTAMP(), 'INSERT'
-                        FROM `{project_id}.{dataset_staging}.{table_staging}` S
-                    '''
-                    bq_client.query(insert_trunc_sql).result()
-                    merge_time = time.time() - merge_start
-                    print(f"\u2705 TRUNCATE+INSERT ejecutado: {dataset_final}.{table_final} reemplazado en {merge_time:.1f}s")
-                    return (True, merge_time, None)
-                except Exception as trunc_err:
-                    merge_time = time.time() - merge_start
-                    err = clean_bq_error(trunc_err)
-                    print(f"\u274c [execute_merge_or_insert] TRUNCATE+INSERT fall\u00f3 para {dataset_final}.{table_final}: {err}")
-                    return (False, merge_time, err)
+        if not final_has_id or not staging_has_id:
+            # Sin 'id' en uno de los dos lados: hacer TRUNCATE + INSERT (reemplazo total). Apropiado para tablas de settings.
+            reason = "no tiene 'id' en staging" if not staging_has_id else "no tiene 'id' en la tabla final"
+            print(f"\u26a0\ufe0f [execute_merge_or_insert] Tabla {dataset_final}.{table_final} {reason}. Usando TRUNCATE + INSERT (reemplazo total).")
+            try:
+                truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
+                bq_client.query(truncate_sql).result()
+                
+                # Para TRUNCATE+INSERT, usar columnas seguras sin 'id' (ya que falta en al menos uno de los lados)
+                trunc_cols = safe_cols
+                
+                # Reutilizar type_mismatches para castear en el INSERT
+                type_mismatches = type_mismatches or {}
+                def _col_trunc_insert_expr(col):
+                    if col in type_mismatches:
+                        final_type = type_mismatches[col]['final']
+                        BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
+                        final_type_sql = BQ_ALIASES.get(final_type, final_type)
+                        return f'SAFE_CAST(S.{col} AS {final_type_sql})'
+                    return f'S.{col}'
+                    
+                insert_trunc_sql = f'''
+                    INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
+                        {', '.join(trunc_cols)}, _etl_synced, _etl_operation
+                    )
+                    SELECT {', '.join([_col_trunc_insert_expr(c) for c in trunc_cols])},
+                           CURRENT_TIMESTAMP(), 'INSERT'
+                    FROM `{project_id}.{dataset_staging}.{table_staging}` S
+                '''
+                bq_client.query(insert_trunc_sql).result()
+                merge_time = time.time() - merge_start
+                print(f"✅ TRUNCATE+INSERT ejecutado: {dataset_final}.{table_final} reemplazado en {merge_time:.1f}s")
+                return (True, merge_time, None)
+            except Exception as trunc_err:
+                merge_time = time.time() - merge_start
+                err = clean_bq_error(trunc_err)
+                print(f"❌ [execute_merge_or_insert] TRUNCATE+INSERT falló para {dataset_final}.{table_final}: {err}")
+                return (False, merge_time, err)
 
         # Construir UPDATE SET: usar SAFE_CAST para columnas con tipo incompatible
         type_mismatches = type_mismatches or {}
@@ -1533,10 +1586,14 @@ def execute_merge_or_insert(
             return f'T.{col} = S.{col}'
         update_set = ', '.join([_col_update_expr(col) for col in safe_cols])
         
-        # Para INSERT, usar columnas seguras + el id
-        cols_list = ['id'] + safe_cols
+        # Para INSERT, usar columnas seguras, agregando 'id' solo si existe
+        if staging_has_id:
+            cols_list = ['id'] + safe_cols
+        else:
+            cols_list = safe_cols
+            
         insert_cols = cols_list
-        insert_values = [f'S.{col}' for col in cols_list]
+        insert_values = [_col_update_expr(col) if col != 'id' else 'S.id' for col in cols_list]
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''
