@@ -1575,15 +1575,20 @@ def execute_merge_or_insert(
                 print(f"❌ [execute_merge_or_insert] TRUNCATE+INSERT falló para {dataset_final}.{table_final}: {err}")
                 return (False, merge_time, err)
 
-        # Construir UPDATE SET: usar SAFE_CAST para columnas con tipo incompatible
+        # Funciones para obtener la expresión a evaluar (S.col o SAFE_CAST)
         type_mismatches = type_mismatches or {}
-        def _col_update_expr(col):
+        def _col_val_expr(col):
             if col in type_mismatches:
                 final_type = type_mismatches[col]['final']
                 BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
                 final_type_sql = BQ_ALIASES.get(final_type, final_type)
-                return f'T.{col} = SAFE_CAST(S.{col} AS {final_type_sql})'
-            return f'T.{col} = S.{col}'
+                return f'SAFE_CAST(S.{col} AS {final_type_sql})'
+            return f'S.{col}'
+            
+        # UPDATE solo lleva {col} = {expr} (BQ no permite alias 'T.' en la izquierda)
+        def _col_update_expr(col):
+            return f'{col} = {_col_val_expr(col)}'
+            
         update_set = ', '.join([_col_update_expr(col) for col in safe_cols])
         
         # Para INSERT, usar columnas seguras, agregando 'id' solo si existe
@@ -1593,7 +1598,8 @@ def execute_merge_or_insert(
             cols_list = safe_cols
             
         insert_cols = cols_list
-        insert_values = [_col_update_expr(col) if col != 'id' else 'S.id' for col in cols_list]
+        # VALUES list usa puramente _col_val_expr
+        insert_values = [_col_val_expr(col) if col != 'id' else 'S.id' for col in cols_list]
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''
@@ -1602,8 +1608,8 @@ def execute_merge_or_insert(
             ON T.id = S.id
             WHEN MATCHED THEN UPDATE SET 
                 {update_set},
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'UPDATE'
+                _etl_synced = CURRENT_TIMESTAMP(),
+                _etl_operation = 'UPDATE'
             WHEN NOT MATCHED THEN INSERT (
                 {', '.join(insert_cols)},
                 _etl_synced, _etl_operation
@@ -1612,8 +1618,8 @@ def execute_merge_or_insert(
                 CURRENT_TIMESTAMP(), 'INSERT'
             )
             WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
-                T._etl_synced = CURRENT_TIMESTAMP(),
-                T._etl_operation = 'DELETE'
+                _etl_synced = CURRENT_TIMESTAMP(),
+                _etl_operation = 'DELETE'
         '''
         
         try:
