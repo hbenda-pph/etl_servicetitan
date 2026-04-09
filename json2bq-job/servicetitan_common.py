@@ -152,14 +152,16 @@ def load_endpoints_from_metadata():
     diferenciándolos de los que maneja Fivetran).
     
     Returns:
-        Lista de tuplas [(endpoint_name, table_name), ...]
+        Lista de tuplas [(endpoint_name, table_name, use_merge), ...]
+        use_merge=False indica que se debe usar WRITE_TRUNCATE directo en lugar de MERGE.
     """
     try:
         client = bigquery.Client(project=METADATA_PROJECT)
         query = f'''
             SELECT DISTINCT 
                 endpoint.name AS endpoint_name,
-                table_name
+                table_name,
+                COALESCE(use_merge, TRUE) AS use_merge
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
             WHERE endpoint IS NOT NULL
               AND endpoint.name IS NOT NULL
@@ -169,8 +171,12 @@ def load_endpoints_from_metadata():
             ORDER BY endpoint.name
         '''
         results = client.query(query).result()
-        endpoints = [(row.endpoint_name, row.table_name) for row in results]
-        print(f"📋 Cargados {len(endpoints)} endpoints desde metadata")
+        endpoints = [(row.endpoint_name, row.table_name, row.use_merge) for row in results]
+        overwrite_endpoints = [t for _, t, m in endpoints if not m]
+        if overwrite_endpoints:
+            print(f"📋 Cargados {len(endpoints)} endpoints desde metadata ({len(overwrite_endpoints)} con OVERWRITE: {overwrite_endpoints})")
+        else:
+            print(f"📋 Cargados {len(endpoints)} endpoints desde metadata")
         return endpoints
     except Exception as e:
         print(f"⚠️ [load_endpoints_from_metadata] Error cargando endpoints desde metadata: {str(e)}")
@@ -1381,15 +1387,16 @@ def load_json_to_staging_with_error_handling(
 def execute_merge_or_insert(
     bq_client, staging_table, final_table, project_id, dataset_final, table_final,
     dataset_staging, table_staging, merge_start, log_event_callback=None,
-    company_id=None, company_name=None, endpoint_name=None, type_mismatches=None
+    company_id=None, company_name=None, endpoint_name=None, type_mismatches=None,
+    use_merge=True, temp_fixed=None
 ):
     """
-    Ejecuta MERGE o INSERT directo dependiendo de si la tabla final está vacía.
+    Ejecuta MERGE, INSERT directo, o OVERWRITE (WRITE_TRUNCATE) dependiendo de la configuración.
     
     Esta función:
-    - Verifica si la tabla final está vacía (primera carga)
-    - Si está vacía: usa INSERT directo (más eficiente)
-    - Si tiene datos: usa MERGE incremental con soft delete
+    - use_merge=False: WRITE_TRUNCATE directo desde staging a bronze (para endpoints con snapshots completos)
+    - use_merge=True + tabla vacía: usa INSERT directo (más eficiente)
+    - use_merge=True + tabla con datos: usa MERGE incremental con soft delete
     
     Args:
         bq_client: Cliente de BigQuery
@@ -1403,10 +1410,64 @@ def execute_merge_or_insert(
         merge_start: Tiempo de inicio (time.time())
         log_event_callback: Función para logging (opcional)
         company_id, company_name, endpoint_name: Para logging (opcionales)
+        use_merge: Si False, usa WRITE_TRUNCATE directo (para endpoints grandes con snapshot completo)
+        temp_fixed: Ruta al archivo NDJSON transformado (requerido cuando use_merge=False)
     
     Returns:
         tuple: (success: bool, merge_time: float, error_message: str or None)
     """
+    # ─── MODO OVERWRITE (use_merge=False) ──────────────────────────────────────
+    # Para endpoints que la API devuelve como snapshot completo (ej: gross_pay_items).
+    # Hace WRITE_TRUNCATE desde staging → bronze, sin MERGE, e inyecta _etl_* via SQL.
+    if not use_merge:
+        print(f"♻️  Modo OVERWRITE activado para {dataset_final}.{table_final} (WRITE_TRUNCATE desde staging)")
+        try:
+            staging_schema = staging_table.schema
+            staging_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
+
+            # Construir SQL de OVERWRITE: TRUNCATE + INSERT desde staging con campos ETL
+            truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
+            bq_client.query(truncate_sql).result()
+
+            cols_str = ', '.join(staging_cols)
+            select_str = ', '.join([f'S.{c}' for c in staging_cols])
+            overwrite_sql = f'''
+                INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
+                    {cols_str},
+                    _etl_synced,
+                    _etl_operation
+                )
+                SELECT
+                    {select_str},
+                    CURRENT_TIMESTAMP(),
+                    'OVERWRITE'
+                FROM `{project_id}.{dataset_staging}.{table_staging}` S
+            '''
+            query_job = bq_client.query(overwrite_sql)
+            query_job.result()
+
+            overwrite_time = time.time() - merge_start
+            # Obtener número de filas insertadas
+            staging_refresh = bq_client.get_table(staging_table.reference)
+            rows_written = staging_refresh.num_rows
+            print(f"✅ OVERWRITE ejecutado: {dataset_final}.{table_final} reemplazado con {rows_written:,} filas en {overwrite_time:.1f}s")
+            return (True, overwrite_time, None)
+
+        except Exception as e:
+            error_msg = clean_bq_error(e)
+            overwrite_time = time.time() - merge_start
+            print(f"❌ [execute_merge_or_insert] OVERWRITE falló para {dataset_final}.{table_final} después de {overwrite_time:.1f}s: {error_msg}")
+            if log_event_callback:
+                log_event_callback(
+                    company_id=company_id,
+                    company_name=company_name,
+                    project_id=project_id,
+                    endpoint=endpoint_name,
+                    event_type="ERROR",
+                    event_title="Error en OVERWRITE",
+                    event_message=f"Error en OVERWRITE: {error_msg}"
+                )
+            return (False, overwrite_time, error_msg)
     staging_schema = staging_table.schema
     final_schema = final_table.schema
     

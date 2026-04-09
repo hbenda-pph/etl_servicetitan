@@ -69,9 +69,9 @@ def process_company(row, endpoints_filter=None, dry_run=False):
     if endpoints_filter:
         # Buscar endpoints que coincidan (por endpoint_name o table_name)
         filtered_endpoints = []
-        for endpoint_name, table_name in all_endpoints:
+        for endpoint_name, table_name, use_merge in all_endpoints:
             if endpoint_name in endpoints_filter or table_name in endpoints_filter:
-                filtered_endpoints.append((endpoint_name, table_name))
+                filtered_endpoints.append((endpoint_name, table_name, use_merge))
         
         if not filtered_endpoints:
             print(f"⚠️ [process_company] No se encontraron endpoints que coincidan con: {endpoints_filter}")
@@ -83,19 +83,20 @@ def process_company(row, endpoints_filter=None, dry_run=False):
         endpoints_to_process = all_endpoints
         print(f"📋 Procesando todos los endpoints ({len(endpoints_to_process)})")
     
-    for endpoint_name, table_name in endpoints_to_process:
+    for endpoint_name, table_name, use_merge in endpoints_to_process:
         endpoint_start_time = time.time()
         json_filename = f"servicetitan_{table_name}.json"
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
-        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) company {company_id}")
+        merge_label = "MERGE" if use_merge else "OVERWRITE"
+        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) [{merge_label}] company {company_id}")
         
         if dry_run:
             print(f"  📋 [DRY-RUN] Se descargaría: gs://{bucket_name}/{json_filename}")
             print(f"  📋 [DRY-RUN] Se transformaría a newline-delimited y snake_case")
             print(f"  📋 [DRY-RUN] Se cargaría a: {project_id}.staging.{table_name}")
-            print(f"  📋 [DRY-RUN] Se ejecutaría MERGE a: {project_id}.bronze.{table_name}")
+            print(f"  📋 [DRY-RUN] Se ejecutaría {merge_label} a: {project_id}.bronze.{table_name}")
             continue
         
         # Descargar archivo JSON del bucket
@@ -280,7 +281,7 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             # Refrescar tabla final después de correcciones
             final_table = bq_client.get_table(table_ref_final)
         
-        # Usar función común para ejecutar MERGE o INSERT
+        # Usar función común para ejecutar MERGE, INSERT o OVERWRITE
         merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
             bq_client=bq_client,
             staging_table=staging_table,
@@ -295,7 +296,9 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             company_id=company_id,
             company_name=company_name,
             endpoint_name=endpoint_name,
-            type_mismatches=type_mismatches
+            type_mismatches=type_mismatches,
+            use_merge=use_merge,
+            temp_fixed=temp_fixed
         )
         
         if merge_success:

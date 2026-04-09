@@ -96,7 +96,7 @@ def process_company(row):
     bucket = storage_client.bucket(bucket_name)
     
     endpoints_count = 0
-    for endpoint_name, table_name in ENDPOINTS:
+    for endpoint_name, table_name, use_merge in ENDPOINTS:
         endpoints_count += 1
         endpoint_start_time = time.time()
         # Usar table_name directamente desde metadata para archivos JSON y tablas
@@ -104,7 +104,8 @@ def process_company(row):
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
-        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) company {company_id}")
+        merge_label = "MERGE" if use_merge else "OVERWRITE"
+        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) [{merge_label}] company {company_id}")
         
         # Descargar archivo JSON del bucket
         try:
@@ -319,7 +320,7 @@ def process_company(row):
         if needs_correction:
             final_table = bq_client.get_table(table_ref_final)
             
-        # Ejecutar MERGE o INSERT (la función común ahora maneja ALTER TABLE internamente)
+        # Ejecutar MERGE, INSERT o OVERWRITE (la función común ahora maneja ALTER TABLE internamente)
         merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
             bq_client=bq_client,
             staging_table=staging_table,
@@ -334,7 +335,9 @@ def process_company(row):
             company_id=company_id,
             company_name=company_name,
             endpoint_name=endpoint_name,
-            type_mismatches=type_mismatches
+            type_mismatches=type_mismatches,
+            use_merge=use_merge,
+            temp_fixed=temp_fixed
         )
         
         if merge_success:

@@ -103,10 +103,11 @@ def process_company(row):
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
     
-    for endpoint_name, table_name in ENDPOINTS:
+    for endpoint_name, table_name, use_merge in ENDPOINTS:
         endpoint_start_time = time.time()
         
-        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) company {company_id}")
+        merge_label = "MERGE" if use_merge else "OVERWRITE"
+        print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) [{merge_label}] company {company_id}")
         
         # Usar table_name directamente desde metadata para archivos JSON y tablas
         json_filename = f"servicetitan_{table_name}.json"
@@ -297,7 +298,7 @@ def process_company(row):
         if needs_correction:
             final_table = bq_client.get_table(table_ref_final)
             
-        # Usar función común para ejecutar MERGE o INSERT con Schema Evolution supercargado
+        # Usar función común para ejecutar MERGE, INSERT o OVERWRITE
         merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
             bq_client=bq_client,
             staging_table=staging_table,
@@ -308,11 +309,13 @@ def process_company(row):
             dataset_staging=dataset_staging,
             table_staging=table_staging,
             merge_start=merge_start,
-            log_event_callback=None, # INBOX usa logs comentados actualmente
+            log_event_callback=None,
             company_id=company_id,
             company_name=company_name,
             endpoint_name=endpoint_name,
-            type_mismatches=type_mismatches
+            type_mismatches=type_mismatches,
+            use_merge=use_merge,
+            temp_fixed=temp_fixed
         )
         
         if merge_success:
