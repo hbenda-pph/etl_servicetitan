@@ -1429,8 +1429,18 @@ def execute_merge_or_insert(
             truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
             bq_client.query(truncate_sql).result()
 
+            # Aplicar SAFE_CAST para columnas con type mismatch (ej: project_id STRING→INT64)
+            type_mismatches = type_mismatches or {}
+            BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
+            def _overwrite_col_expr(col):
+                if col in type_mismatches:
+                    final_type = type_mismatches[col]['final']
+                    final_type_sql = BQ_ALIASES.get(final_type, final_type)
+                    return f'SAFE_CAST(S.{col} AS {final_type_sql})'
+                return f'S.{col}'
+
             cols_str = ', '.join(staging_cols)
-            select_str = ', '.join([f'S.{c}' for c in staging_cols])
+            select_str = ', '.join([_overwrite_col_expr(c) for c in staging_cols])
             overwrite_sql = f'''
                 INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
                     {cols_str},
