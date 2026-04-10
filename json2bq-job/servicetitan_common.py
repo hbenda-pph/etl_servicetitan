@@ -152,8 +152,10 @@ def load_endpoints_from_metadata():
     diferenciándolos de los que maneja Fivetran).
     
     Returns:
-        Lista de tuplas [(endpoint_name, table_name, use_merge), ...]
-        use_merge=False indica que se debe usar WRITE_TRUNCATE directo en lugar de MERGE.
+        Lista de tuplas [(endpoint_name, table_name, use_merge, is_production), ...]
+        use_merge=False       → usa CREATE OR REPLACE TABLE (snapshot completo) en lugar de MERGE.
+        is_production=False → endpoint en desarrollo: fuerza CREATE OR REPLACE TABLE siempre,
+                                ignorando use_merge, para mantener schema limpio.
     """
     try:
         client = bigquery.Client(project=METADATA_PROJECT)
@@ -161,7 +163,8 @@ def load_endpoints_from_metadata():
             SELECT DISTINCT 
                 endpoint.name AS endpoint_name,
                 table_name,
-                COALESCE(use_merge, TRUE) AS use_merge
+                COALESCE(use_merge, TRUE) AS use_merge,
+                COALESCE(is_production, FALSE) AS is_production
             FROM `{METADATA_PROJECT}.{METADATA_DATASET}.{METADATA_TABLE}`
             WHERE endpoint IS NOT NULL
               AND endpoint.name IS NOT NULL
@@ -171,16 +174,18 @@ def load_endpoints_from_metadata():
             ORDER BY endpoint.name
         '''
         results = client.query(query).result()
-        endpoints = [(row.endpoint_name, row.table_name, row.use_merge) for row in results]
-        overwrite_endpoints = [t for _, t, m in endpoints if not m]
-        if overwrite_endpoints:
-            print(f"📋 Cargados {len(endpoints)} endpoints desde metadata ({len(overwrite_endpoints)} con OVERWRITE: {overwrite_endpoints})")
+        endpoints = [(row.endpoint_name, row.table_name, row.use_merge, row.is_production) for row in results]
+        overwrite_eps  = [t for _, t, m, c in endpoints if not m]
+        dev_eps        = [t for _, t, m, c in endpoints if not c]
+        if dev_eps:
+            print(f"📋 Cargados {len(endpoints)} endpoints | OVERWRITE: {overwrite_eps or 'ninguno'} | En desarrollo (CREATE OR REPLACE): {dev_eps}")
         else:
-            print(f"📋 Cargados {len(endpoints)} endpoints desde metadata")
+            print(f"📋 Cargados {len(endpoints)} endpoints | OVERWRITE: {overwrite_eps or 'ninguno'}")
         return endpoints
     except Exception as e:
         print(f"⚠️ [load_endpoints_from_metadata] Error cargando endpoints desde metadata: {str(e)}")
         return []
+
 
 def to_snake_case(name):
     """Convierte un nombre de camelCase o PascalCase a snake_case"""
@@ -348,34 +353,28 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
     # Para otros tipos, retornar tal cual
     return value
 
-def fix_json_format(local_path, temp_path, repeated_fields=None, stringify_fields=None):
+def fix_json_format(local_path, temp_path, repeated_fields=None, stringify_fields=None, bronze_type_map=None):
     """Transforma el JSON a formato newline-delimited y snake_case.
     IMPORTANTE: Campos de nivel superior → snake_case, campos dentro de STRUCT → camelCase (preservar fuente).
     Soporta tanto JSON array como newline-delimited JSON.
     Si se proporciona repeated_fields, convierte NULL a [] para esos campos.
     Si se proporciona stringify_fields, convierte el contenido a un JSON string.
+    Si se proporciona bronze_type_map, coerciona tipos en origen para evitar doble carga a staging.
     También corrige campos anidados que deberían ser arrays pero vienen como objetos.
     
     Para archivos grandes (>100MB), usa procesamiento streaming para evitar problemas de memoria."""
     
     # Detectar tamaño del archivo
     file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
-    LARGE_FILE_THRESHOLD_MB = 100  # Usar streaming para archivos >100MB
-    VERY_LARGE_FILE_THRESHOLD_MB = 1000  # Para archivos >1GB, forzar streaming
-    
-    # Para archivos entre 100MB y 1GB, cargar completo es más confiable que parsing incremental
-    # El parsing incremental con raw_decode puede atascarse en items problemáticos
-    if file_size_mb > VERY_LARGE_FILE_THRESHOLD_MB:
-        # Archivos >1GB: usar streaming (parsing incremental)
-        return fix_json_format_streaming(local_path, temp_path, repeated_fields, stringify_fields)
-    elif file_size_mb > LARGE_FILE_THRESHOLD_MB:
-        # Archivos 100MB-1GB: cargar completo en memoria (más confiable)
-        # 906MB es grande pero manejable en la mayoría de sistemas
-        print(f"📦 Archivo grande ({file_size_mb:.2f} MB) pero <1GB. Cargando completo en memoria para mayor confiabilidad...")
-        # Continuar con procesamiento en memoria (código más abajo)
-    else:
-        # Archivos <100MB: procesamiento en memoria (ya está implementado)
-        pass
+    # Umbral para usar streaming en lugar de cargar todo en memoria.
+    # 200MB es el límite seguro por task: con N tasks paralelas en Cloud Run,
+    # N * 200MB * 2 (fuente + transformado) debe caber en la RAM disponible.
+    # Archivos como gross_pay_items (~950MB) DEBEN usar streaming para evitar OOM.
+    STREAMING_THRESHOLD_MB = 200
+
+    if file_size_mb > STREAMING_THRESHOLD_MB:
+        print(f"🌊 Archivo grande ({file_size_mb:.2f} MB) → modo streaming (evita OOM en Cloud Run)")
+        return fix_json_format_streaming(local_path, temp_path, repeated_fields, stringify_fields, bronze_type_map)
     
     # Procesamiento en memoria - SIMPLIFICADO Y ROBUSTO
     print(f"📖 Cargando JSON completo en memoria...")
@@ -400,12 +399,42 @@ def fix_json_format(local_path, temp_path, repeated_fields=None, stringify_field
         repeated_fields = set(repeated_fields)
         
     sample_size = min(1000, total_items)
+    # Detectar campos array Y campos con tipos mixtos (ej: location_zip que viene como "-" en algunos registros)
+    # Los campos mixed-type (num + string no-numérico) se fuerzan a STRING para evitar doble carga a staging
+    field_types = {}  # {snake_key: set de tipos Python vistos}
+    if stringify_fields is None:
+        stringify_fields = set()
+    elif not isinstance(stringify_fields, set):
+        stringify_fields = set(stringify_fields)
+
     for item in json_data[:sample_size]:
         if isinstance(item, dict):
             for k, v in item.items():
                 snake_key = to_snake_case(k)
                 if isinstance(v, list):
                     repeated_fields.add(snake_key)
+                elif v is not None:
+                    # Registrar qué tipos de valores tiene este campo
+                    if snake_key not in field_types:
+                        field_types[snake_key] = {'has_numeric': False, 'has_non_numeric_str': False}
+                    if isinstance(v, (int, float)):
+                        field_types[snake_key]['has_numeric'] = True
+                    elif isinstance(v, str) and v.strip():
+                        # String no vacío: verificar si es puramente numérico
+                        try:
+                            float(v)
+                            field_types[snake_key]['has_numeric'] = True
+                        except ValueError:
+                            field_types[snake_key]['has_non_numeric_str'] = True
+
+    # Forzar a STRING campos que tienen mix de numérico + string no-numérico
+    auto_stringified = []
+    for snake_key, types in field_types.items():
+        if types['has_numeric'] and types['has_non_numeric_str'] and snake_key not in stringify_fields:
+            stringify_fields.add(snake_key)
+            auto_stringified.append(snake_key)
+    if auto_stringified:
+        print(f"🔍 Campos con tipos mixtos detectados (forzados a STRING): {sorted(auto_stringified)}")
     
     # Transformar cada item con progreso
     print(f"🔄 Transformando {total_items:,} items a snake_case...")
@@ -415,7 +444,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None, stringify_field
     last_progress = start_transform
     
     for item in json_data:
-        transformed_item = transform_item(item, repeated_fields, stringify_fields)
+        transformed_item = transform_item(item, repeated_fields, stringify_fields, bronze_type_map)
         transformed_items.append(transformed_item)
         items_processed += 1
         
@@ -433,7 +462,7 @@ def fix_json_format(local_path, temp_path, repeated_fields=None, stringify_field
     transform_time = time.time() - start_transform
     print(f"✅ Transformación completada: {len(transformed_items):,} items procesados en {transform_time:.1f}s ({len(transformed_items)/transform_time:.0f} items/seg)")
 
-def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, stringify_fields=None):
+def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, stringify_fields=None, bronze_type_map=None):
     """Versión streaming de fix_json_format para archivos grandes.
     Procesa línea por línea para evitar cargar todo en memoria.
     Usa json.JSONDecoder para parsear JSON arrays de forma incremental."""
@@ -507,13 +536,39 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                 except:
                     pass
     
-    # Detectar campos array
+    # Detectar campos array Y campos con tipos mixtos en la muestra
+    if stringify_fields is None:
+        stringify_fields = set()
+    elif not isinstance(stringify_fields, set):
+        stringify_fields = set(stringify_fields)
+
+    field_types = {}  # {snake_key: set de tipos vistos}
     for item in items:
         if isinstance(item, dict):
             for k, v in item.items():
                 snake_key = to_snake_case(k)
                 if isinstance(v, list):
                     repeated_fields.add(snake_key)
+                elif v is not None:
+                    if snake_key not in field_types:
+                        field_types[snake_key] = {'has_numeric': False, 'has_non_numeric_str': False}
+                    if isinstance(v, (int, float)):
+                        field_types[snake_key]['has_numeric'] = True
+                    elif isinstance(v, str) and v.strip():
+                        try:
+                            float(v)
+                            field_types[snake_key]['has_numeric'] = True
+                        except ValueError:
+                            field_types[snake_key]['has_non_numeric_str'] = True
+
+    # Forzar a STRING campos que tienen mix de numérico + string no-numérico
+    auto_stringified = []
+    for snake_key, types in field_types.items():
+        if types['has_numeric'] and types['has_non_numeric_str'] and snake_key not in stringify_fields:
+            stringify_fields.add(snake_key)
+            auto_stringified.append(snake_key)
+    if auto_stringified:
+        print(f"🔍 Campos con tipos mixtos detectados (forzados a STRING): {sorted(auto_stringified)}")
     
     # Procesar archivo completo
     with open(local_path, 'r', encoding='utf-8') as f_in:
@@ -560,7 +615,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                         
                         try:
                             obj, consumed = decoder.raw_decode(buffer)
-                            transformed = transform_item(obj, repeated_fields)
+                            transformed = transform_item(obj, repeated_fields, stringify_fields, bronze_type_map)
                             f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                             items_processed += 1
                             items_since_last_progress += 1
@@ -609,7 +664,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                             # Hay datos sin procesar - intentar parsear uno más
                             try:
                                 obj, consumed = decoder.raw_decode(buffer_remaining.rstrip(',').rstrip(']').strip())
-                                transformed = transform_item(obj, repeated_fields, stringify_fields)
+                                transformed = transform_item(obj, repeated_fields, stringify_fields, bronze_type_map)
                                 f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                                 items_processed += 1
                             except:
@@ -621,7 +676,7 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                     if line.strip():
                         try:
                             item = json.loads(line)
-                            transformed = transform_item(item, repeated_fields, stringify_fields)
+                            transformed = transform_item(item, repeated_fields, stringify_fields, bronze_type_map)
                             f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                             items_processed += 1
                             
@@ -641,32 +696,72 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
     else:
         print(f"✅ Transformación completada: {items_processed:,} items procesados en {total_time:.1f}s ({items_processed/total_time:.0f} items/seg)")
 
-def transform_item(item, array_fields, stringify_fields=None):
-    """Transforma un item individual a snake_case en nivel superior, preserva camelCase en STRUCT."""
+def transform_item(item, array_fields, stringify_fields=None, bronze_type_map=None):
+    """
+    Transforma un item individual a snake_case en nivel superior, preserva camelCase en STRUCT.
+    
+    Si se proporciona bronze_type_map ({campo: tipo_bq}), aplica coerción de tipos durante
+    la transformación: valores string que no pueden convertirse al tipo esperado se convierten
+    a NULL. Esto evita que BigQuery rechace el archivo y fuerce una doble carga a staging.
+    
+    El bronze_type_map se construye dinámicamente desde el schema real de bronze, sin hardcodeo.
+    """
+    # Tipos numéricos y booleanos que deben coercionarse si el valor viene como string
+    _NUMERIC_INT  = frozenset({'INT64', 'INTEGER', 'INT', 'SMALLINT', 'BIGINT', 'BYTEINT'})
+    _NUMERIC_FLOAT = frozenset({'FLOAT64', 'FLOAT', 'NUMERIC', 'BIGNUMERIC'})
+    _BOOL_TYPES   = frozenset({'BOOL', 'BOOLEAN'})
+
     new_item = {}
     for k, v in item.items():
         snake_key = to_snake_case(k)  # snake_case para campos de nivel superior
         
         # Procesar recursivamente: preserva camelCase dentro de STRUCT
-        # Usamos snake_key (lower) para comparar con array_fields
         fixed_value = fix_nested_value(v, snake_key, array_fields)
         
-        # Forzar el campo a string JSON ANTES de intentar convertir nulos a array
-        # Esto es vital para evitar que el schema inferido asuma ARRAY cuando
-        # en realidad queremos que todo el campo sea TEXTO.
         if stringify_fields and snake_key in stringify_fields:
+            # Forzar campo a JSON string (por autodetección de problemas en ejecuciones previas)
             new_item[snake_key] = json.dumps(fixed_value, ensure_ascii=False) if fixed_value is not None else None
-        # Si el campo es un array pero no está forzado a string, y viene null, hacerlo array vacío
+
         elif snake_key in array_fields and fixed_value is None:
             new_item[snake_key] = []
+
+        elif (
+            bronze_type_map
+            and snake_key in bronze_type_map
+            and isinstance(fixed_value, str)
+            and fixed_value != ''
+        ):
+            # Coerción genérica basada en el schema real de bronze:
+            # Si el valor es un string pero bronze espera un tipo numérico/bool,
+            # intentar convertir. Si falla → NULL (no error de BQ).
+            expected = bronze_type_map[snake_key].upper()
+            if expected in _NUMERIC_INT:
+                try:
+                    new_item[snake_key] = int(float(fixed_value))  # float() primero tolera "3.0"
+                except (ValueError, TypeError):
+                    new_item[snake_key] = None  # ej: "-", "N/A", "" → NULL
+            elif expected in _NUMERIC_FLOAT:
+                try:
+                    new_item[snake_key] = float(fixed_value)
+                except (ValueError, TypeError):
+                    new_item[snake_key] = None
+            elif expected in _BOOL_TYPES:
+                lower_v = fixed_value.lower()
+                if lower_v in ('true', '1', 'yes'):
+                    new_item[snake_key] = True
+                elif lower_v in ('false', '0', 'no'):
+                    new_item[snake_key] = False
+                else:
+                    new_item[snake_key] = None
+            else:
+                new_item[snake_key] = fixed_value  # DATE, TIMESTAMP, STRING, STRUCT → sin tocar
+
         else:
             new_item[snake_key] = fixed_value
             
-    # CRÍTICO: Si la fila no tenía la llave en lo absoluto, BigQuery lo interpretará como NULL.
-    # Debemos inyectar explicitamente un [] para los campos que sabemos que deben ser arrays.
+    # Inyectar [] para campos array que no estaban presentes en el item
     if array_fields:
         for array_field in array_fields:
-            # Solo para campos de nivel superior
             if '.' not in array_field and array_field not in new_item:
                 new_item[array_field] = []
                 
@@ -1388,15 +1483,17 @@ def execute_merge_or_insert(
     bq_client, staging_table, final_table, project_id, dataset_final, table_final,
     dataset_staging, table_staging, merge_start, log_event_callback=None,
     company_id=None, company_name=None, endpoint_name=None, type_mismatches=None,
-    use_merge=True, temp_fixed=None
+    use_merge=True, temp_fixed=None, is_production=True
 ):
     """
-    Ejecuta MERGE, INSERT directo, o OVERWRITE (WRITE_TRUNCATE) dependiendo de la configuración.
+    Ejecuta MERGE, INSERT directo, o CREATE OR REPLACE TABLE dependiendo de la configuración.
     
-    Esta función:
-    - use_merge=False: WRITE_TRUNCATE directo desde staging a bronze (para endpoints con snapshots completos)
-    - use_merge=True + tabla vacía: usa INSERT directo (más eficiente)
-    - use_merge=True + tabla con datos: usa MERGE incremental con soft delete
+    Modos:
+    - is_production=False : fuerza CREATE OR REPLACE TABLE (schema siempre desde staging).
+                              Úsalo durante desarrollo activo de un endpoint.
+    - use_merge=False       : CREATE OR REPLACE TABLE (snapshot completo, endpoint consolidado).
+    - use_merge=True + tabla vacía  : INSERT directo (primera carga).
+    - use_merge=True + tabla llena  : MERGE incremental con soft delete.
     
     Args:
         bq_client: Cliente de BigQuery
@@ -1410,54 +1507,44 @@ def execute_merge_or_insert(
         merge_start: Tiempo de inicio (time.time())
         log_event_callback: Función para logging (opcional)
         company_id, company_name, endpoint_name: Para logging (opcionales)
-        use_merge: Si False, usa WRITE_TRUNCATE directo (para endpoints grandes con snapshot completo)
-        temp_fixed: Ruta al archivo NDJSON transformado (requerido cuando use_merge=False)
+        use_merge: Si False, usa CREATE OR REPLACE TABLE (snapshot completo consolidado)
+        temp_fixed: Ruta al archivo NDJSON transformado
+        is_production: Si False, fuerza CREATE OR REPLACE TABLE para mantener schema limpio
+                         durante período de desarrollo activo del endpoint.
     
     Returns:
         tuple: (success: bool, merge_time: float, error_message: str or None)
     """
+    # ─── MODO DESARROLLO (is_production=False) ────────────────────────────────
+    # Si el endpoint NO está consolidado, forzar CREATE OR REPLACE TABLE siempre.
+    # Esto garantiza que el schema de bronze siempre refleje el schema actual de staging,
+    # eliminando deuda de schema acumulada por cambios de código durante el desarrollo.
+    if not is_production:
+        print(f"🔧 Endpoint en DESARROLLO (is_production=False): forzando CREATE OR REPLACE TABLE para {dataset_final}.{table_final}")
+        use_merge = False  # Delegar al bloque OVERWRITE a continuación
+
     # ─── MODO OVERWRITE (use_merge=False) ──────────────────────────────────────
     # Para endpoints que la API devuelve como snapshot completo (ej: gross_pay_items).
-    # Hace WRITE_TRUNCATE desde staging → bronze, sin MERGE, e inyecta _etl_* via SQL.
+    # Usa CREATE OR REPLACE TABLE: una sola operación server-side que reemplaza
+    # schema + datos en un paso. Ignora diferencias staging-bronze por diseño.
     if not use_merge:
-        print(f"♻️  Modo OVERWRITE activado para {dataset_final}.{table_final} (WRITE_TRUNCATE desde staging)")
+        print(f"♻️  Modo OVERWRITE activado para {dataset_final}.{table_final}")
         try:
-            staging_schema = staging_table.schema
-            staging_cols = [col.name for col in staging_schema if not col.name.startswith('_etl_')]
-
-            # Construir SQL de OVERWRITE: TRUNCATE + INSERT desde staging con campos ETL
-            truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
-            bq_client.query(truncate_sql).result()
-
-            # Aplicar SAFE_CAST para columnas con type mismatch (ej: project_id STRING→INT64)
-            type_mismatches = type_mismatches or {}
-            BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
-            def _overwrite_col_expr(col):
-                if col in type_mismatches:
-                    final_type = type_mismatches[col]['final']
-                    final_type_sql = BQ_ALIASES.get(final_type, final_type)
-                    return f'SAFE_CAST(S.{col} AS {final_type_sql})'
-                return f'S.{col}'
-
-            cols_str = ', '.join(staging_cols)
-            select_str = ', '.join([_overwrite_col_expr(c) for c in staging_cols])
-            overwrite_sql = f'''
-                INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
-                    {cols_str},
-                    _etl_synced,
-                    _etl_operation
-                )
+            # Una sola operación server-side: reemplaza schema + datos en BigQuery.
+            # No requiere TRUNCATE previo, no tiene type mismatch, no necesita ALTER.
+            overwrite_sql = f"""
+                CREATE OR REPLACE TABLE `{project_id}.{dataset_final}.{table_final}`
+                AS
                 SELECT
-                    {select_str},
-                    CURRENT_TIMESTAMP(),
-                    'OVERWRITE'
-                FROM `{project_id}.{dataset_staging}.{table_staging}` S
-            '''
+                    *,
+                    CURRENT_TIMESTAMP() AS _etl_synced,
+                    'OVERWRITE' AS _etl_operation
+                FROM `{project_id}.{dataset_staging}.{table_staging}`
+            """
             query_job = bq_client.query(overwrite_sql)
             query_job.result()
 
             overwrite_time = time.time() - merge_start
-            # Obtener número de filas insertadas
             staging_refresh = bq_client.get_table(staging_table.reference)
             rows_written = staging_refresh.num_rows
             print(f"✅ OVERWRITE ejecutado: {dataset_final}.{table_final} reemplazado con {rows_written:,} filas en {overwrite_time:.1f}s")
@@ -1478,6 +1565,7 @@ def execute_merge_or_insert(
                     event_message=f"Error en OVERWRITE: {error_msg}"
                 )
             return (False, overwrite_time, error_msg)
+
     staging_schema = staging_table.schema
     final_schema = final_table.schema
     

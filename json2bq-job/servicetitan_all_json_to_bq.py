@@ -20,7 +20,7 @@ from servicetitan_common import (
     load_json_to_staging_with_error_handling,
     validate_json_file,
     align_schemas_before_merge,
-    execute_merge_or_insert
+    execute_merge_or_insert,
 )
 
 PROJECT_SOURCE = get_project_source()
@@ -96,15 +96,19 @@ def process_company(row):
     bucket = storage_client.bucket(bucket_name)
     
     endpoints_count = 0
-    for endpoint_name, table_name, use_merge in ENDPOINTS:
+    for endpoint_name, table_name, use_merge, is_production in ENDPOINTS:
         endpoints_count += 1
         endpoint_start_time = time.time()
-        # Usar table_name directamente desde metadata para archivos JSON y tablas
         json_filename = f"servicetitan_{table_name}.json"
         temp_json = f"/tmp/{project_id}_{table_name}.json"
         temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
         
-        merge_label = "MERGE" if use_merge else "OVERWRITE"
+        if not is_production:
+            merge_label = "DEV"
+        elif not use_merge:
+            merge_label = "OVERWRITE"
+        else:
+            merge_label = "MERGE"
         print(f"\n📦 ENDPOINT: {endpoint_name} (tabla: {table_name}) [{merge_label}] company {company_id}")
         
         # Descargar archivo JSON del bucket
@@ -176,13 +180,25 @@ def process_company(row):
             print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
-        # Transformar a newline-delimited y snake_case (primera pasada)
+        # Transformar a newline-delimited y snake_case
+        # Si bronze ya existe, construir bronze_type_map para coerción de tipos
+        # en una sola pasada (evita doble carga a staging por type mismatch).
         try:
             transform_start = time.time()
             file_size_mb = os.path.getsize(temp_json) / (1024 * 1024)
             if file_size_mb > 100:
                 print(f"🔄 Transformando archivo grande ({file_size_mb:.2f} MB) a newline-delimited y snake_case (esto puede tomar varios minutos)...")
-            fix_json_format(temp_json, temp_fixed)
+            bronze_type_map = None
+            try:
+                _bq_tmp = bigquery.Client(project=project_id)
+                _bronze = _bq_tmp.get_table(f"{project_id}.bronze.{table_name}")
+                bronze_type_map = {
+                    f.name: f.field_type for f in _bronze.schema
+                    if f.field_type not in ('RECORD', 'STRUCT') and f.mode != 'REPEATED'
+                }
+            except Exception:
+                pass  # Primera carga o error → sin coerción, BQ autodetecta
+            fix_json_format(temp_json, temp_fixed, bronze_type_map=bronze_type_map)
             transform_time = time.time() - transform_start
             if file_size_mb <= 100:
                 print(f"🔄 Transformado a newline-delimited y snake_case en {transform_time:.1f}s")
@@ -337,7 +353,8 @@ def process_company(row):
             endpoint_name=endpoint_name,
             type_mismatches=type_mismatches,
             use_merge=use_merge,
-            temp_fixed=temp_fixed
+            temp_fixed=temp_fixed,
+            is_production=is_production
         )
         
         if merge_success:
