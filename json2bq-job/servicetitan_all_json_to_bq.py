@@ -277,6 +277,10 @@ def process_company(row):
         # Carga exitosa, continuar con el proceso
         # (load_time ya está calculado por la función común)
         
+        # Iniciar cronómetro de la operación final
+        merge_start = time.time()
+        staging_table = bq_client.get_table(table_ref_staging)
+        
         # SOLO aseguramos que exista y verificamos esquemas si vamos a hacer MERGE
         final_table = None
         type_mismatches = None
