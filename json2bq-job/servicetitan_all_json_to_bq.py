@@ -21,6 +21,7 @@ from servicetitan_common import (
     validate_json_file,
     align_schemas_before_merge,
     execute_merge_or_insert,
+    clean_bq_error,
 )
 
 PROJECT_SOURCE = get_project_source()

@@ -629,9 +629,10 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                             # Resetear contador de intentos después de parsear exitosamente
                             parse_attempts = 0
                             
-                            # Actualizar contadores de progreso sin imprimir para evitar logs excesivos
+                            # Actualizar contadores de progreso y mostrar avance al usuario
                             current_time = time.time()
-                            if (current_time - last_progress_time >= 10) or (items_since_last_progress >= 1000):
+                            if (current_time - last_progress_time >= 10) or (items_since_last_progress >= 50000):
+                                print(f"  ⏳ Procesando streaming... {items_processed:,} items transformados")
                                 last_progress_time = current_time
                                 items_since_last_progress = 0
                         except (ValueError, json.JSONDecodeError) as e:
