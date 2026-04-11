@@ -187,6 +187,9 @@ def load_endpoints_from_metadata():
         return []
 
 
+import functools
+
+@functools.lru_cache(maxsize=4096)
 def to_snake_case(name):
     """Convierte un nombre de camelCase o PascalCase a snake_case"""
     # Insertar underscore antes de mayúsculas seguidas de minúsculas
