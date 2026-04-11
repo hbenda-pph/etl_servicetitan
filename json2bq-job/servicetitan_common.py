@@ -610,56 +610,52 @@ def fix_json_format_streaming(local_path, temp_path, repeated_fields=None, strin
                     parse_attempts = 0
                     max_parse_attempts = 1000  # Evitar loops infinitos
                     
-                    while buffer and parse_attempts < max_parse_attempts:
+                    idx = 0
+                    while idx < len(buffer) and parse_attempts < max_parse_attempts:
                         parse_attempts += 1
-                        buffer = buffer.lstrip()
-                        if not buffer or buffer[0] == ']':
+                        while idx < len(buffer) and buffer[idx].isspace(): idx += 1
+                        if idx >= len(buffer) or buffer[idx] == ']':
                             break
                         
                         try:
-                            obj, consumed = decoder.raw_decode(buffer)
+                            obj, consumed = decoder.raw_decode(buffer, idx)
                             transformed = transform_item(obj, repeated_fields, stringify_fields, bronze_type_map)
                             f_out.write(json.dumps(transformed, ensure_ascii=False) + '\n')
                             items_processed += 1
                             items_since_last_progress += 1
                             
-                            # Avanzar después del item
-                            buffer = buffer[consumed:].lstrip()
-                            # Saltar coma si existe
-                            if buffer and buffer[0] == ',':
-                                buffer = buffer[1:].lstrip()
+                            idx = consumed
+                            while idx < len(buffer) and buffer[idx].isspace(): idx += 1
+                            if idx < len(buffer) and buffer[idx] == ',':
+                                idx += 1
                             
-                            # Resetear contador de intentos después de parsear exitosamente
                             parse_attempts = 0
                             
-                            # Actualizar contadores de progreso y mostrar avance al usuario
+                            # Actualizar contadores de progreso sin imprimir para evitar logs excesivos
                             current_time = time.time()
                             if (current_time - last_progress_time >= 10) or (items_since_last_progress >= 50000):
-                                print(f"  ⏳ Procesando streaming... {items_processed:,} items transformados")
                                 last_progress_time = current_time
                                 items_since_last_progress = 0
                         except (ValueError, json.JSONDecodeError) as e:
-                            # Item incompleto o mal formado
-                            # Si no hay más chunk, intentar avanzar manualmente para no quedarse atascado
                             if not chunk:
-                                # Intentar avanzar saltando caracteres hasta encontrar una coma o ']'
-                                # Esto ayuda a recuperarse de items mal formados
                                 found_separator = False
-                                for i, char in enumerate(buffer[:1000]):  # Buscar en próximos 1000 caracteres
-                                    if char == ',' or char == ']':
-                                        buffer = buffer[i+1:].lstrip()
+                                for i in range(idx, min(idx + 1000, len(buffer))):
+                                    if buffer[i] == ',' or buffer[i] == ']':
+                                        idx = i + 1
                                         found_separator = True
                                         break
-                                
                                 if not found_separator:
-                                    # No se encontró separador, probablemente fin del archivo
                                     if items_processed == 0:
                                         print(f"⚠️ [fix_json_format_streaming] Error parseando JSON: {str(e)[:200]}")
                                     break
                             else:
-                                # Hay más datos, esperar al siguiente chunk
                                 break
                     
+                    if idx < len(buffer):
+                        buffer = buffer[idx:]
+                    else:
+                        buffer = ""
+                        
                     # Si no hay más datos y el buffer está vacío o solo tiene ']', terminamos
                     if not chunk:
                         # Verificar si quedó algo en el buffer antes de terminar
