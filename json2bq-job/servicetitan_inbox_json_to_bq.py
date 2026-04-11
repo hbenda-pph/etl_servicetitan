@@ -266,54 +266,51 @@ def process_company(row):
             print(f"❌ [process_company] Endpoint {endpoint_name} completado con errores en {endpoint_time:.1f}s total")
             continue
         
-        # Asegurar que la tabla final existe
-        try:
-            bq_client.get_table(table_ref_final)
-            print(f"✅ Tabla final {dataset_final}.{table_final} ya existe.")
-        except NotFound:
-            schema = bq_client.get_table(table_ref_staging).schema
-            # AGREGAR CAMPOS ETL AL ESQUEMA (SOLO 2 CAMPOS)
-            campos_etl = [
-                bigquery.SchemaField("_etl_synced", "TIMESTAMP", mode="REQUIRED"),
-                bigquery.SchemaField("_etl_operation", "STRING", mode="REQUIRED")
-            ]
-            schema_completo = list(schema) + campos_etl
-            
-            table = bigquery.Table(table_ref_final, schema=schema_completo)
-            bq_client.create_table(table)
-            print(f"🆕 Tabla final {dataset_final}.{table_final} creada con esquema ETL.")
-            
-            # log_event_bq( [COMENTADO]
-            #     company_id=company_id,
-            #     company_name=company_name,
-            #     project_id=project_id,
-            #     endpoint=endpoint_name,
-            #     event_type="INFO",
-            #     event_title="Tabla final creada",
-            #     event_message=f"Tabla final {dataset_final}.{table_final} creada automáticamente con campos ETL"
-            # )
-        
         # MERGE/INSERT (usando función común ahora potenciada)
         merge_start = time.time()
         staging_table = bq_client.get_table(table_ref_staging)
-        final_table = bq_client.get_table(table_ref_final)
         
-        # Verificar y corregir incompatibilidades de esquema (tipos incompatibles)
-        print(f"🔍 Verificando compatibilidad de esquemas entre staging y final...")
-        needs_correction, corrections_made, alignment_error, type_mismatches = align_schemas_before_merge(
-            bq_client=bq_client,
-            staging_table=staging_table,
-            final_table=final_table,
-            project_id=project_id,
-            dataset_final=dataset_final,
-            table_final=table_final
-        )
+        # SOLO aseguramos que exista y verificamos esquemas si vamos a hacer MERGE
+        final_table = None
+        type_mismatches = None
         
-        if alignment_error:
-            print(f"❌ [process_company] Error alineando esquemas: {alignment_error}")
+        if is_production and use_merge:
+            # Asegurar que la tabla final existe
+            try:
+                final_table = bq_client.get_table(table_ref_final)
+                print(f"✅ Tabla final {dataset_final}.{table_final} ya existe.")
+            except NotFound:
+                schema = staging_table.schema
+                # AGREGAR CAMPOS ETL AL ESQUEMA (SOLO 2 CAMPOS)
+                campos_etl = [
+                    bigquery.SchemaField("_etl_synced", "TIMESTAMP", mode="REQUIRED"),
+                    bigquery.SchemaField("_etl_operation", "STRING", mode="REQUIRED")
+                ]
+                schema_completo = list(schema) + campos_etl
+                
+                table = bigquery.Table(table_ref_final, schema=schema_completo)
+                final_table = bq_client.create_table(table)
+                print(f"🆕 Tabla final {dataset_final}.{table_final} creada con esquema ETL.")
             
-        if needs_correction:
-            final_table = bq_client.get_table(table_ref_final)
+            # Verificar y corregir incompatibilidades de esquema (tipos incompatibles)
+            print(f"🔍 Verificando compatibilidad de esquemas entre staging y final (Modo MERGE)...")
+            needs_correction, corrections_made, alignment_error, type_mismatches = align_schemas_before_merge(
+                bq_client=bq_client,
+                staging_table=staging_table,
+                final_table=final_table,
+                project_id=project_id,
+                dataset_final=dataset_final,
+                table_final=table_final
+            )
+            
+            if alignment_error:
+                print(f"❌ [process_company] Error alineando esquemas: {alignment_error}")
+                
+            if needs_correction:
+                final_table = bq_client.get_table(table_ref_final)
+        else:
+            reason = "DEV Mode" if not is_production else "OVERWRITE Mode"
+            print(f"⏭️  Saltando verificación de esquemas ({reason}) -> se creará/reemplazará la tabla completa")
             
         # Usar función común para ejecutar MERGE, INSERT o OVERWRITE
         merge_success, merge_time, merge_error_msg = execute_merge_or_insert(
