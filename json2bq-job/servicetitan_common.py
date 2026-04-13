@@ -175,6 +175,9 @@ def load_endpoints_from_metadata():
         '''
         results = client.query(query).result()
         endpoints = [(row.endpoint_name, row.table_name, row.use_merge, row.is_production) for row in results]
+        # Asegurar orden alfabético por el nombre del endpoint por si hay diferencias de mayúsculas/minúsculas
+        endpoints.sort(key=lambda x: str(x[0]).lower())
+        
         overwrite_eps  = [t for _, t, m, c in endpoints if not m]
         dev_eps        = [t for _, t, m, c in endpoints if not c]
         if dev_eps:
