@@ -293,6 +293,29 @@ def log_event_bq(company_id=None, company_name=None, project_id=None, endpoint=N
     except Exception as e:
         print(f"❌ [log_event_bq] Error en logging: {str(e)}")
 
+def update_monitoring_snapshot(bq_client, company_id, endpoint_name):
+    """Actualiza la tabla etl_monitoring_snapshot cuando un ETL es exitoso."""
+    try:
+        if company_id and endpoint_name:
+            snapshot_query = f"""
+                MERGE `{METADATA_PROJECT}.management.etl_monitoring_snapshot` T
+                USING (
+                  SELECT 
+                    {int(company_id)} as comp_id, 
+                    '{endpoint_name}' as ep_name, 
+                    CURRENT_TIMESTAMP() as max_sync
+                ) S
+                ON T.company_id = S.comp_id AND T.endpoint_name = S.ep_name
+                WHEN MATCHED THEN
+                    UPDATE SET max_sync = S.max_sync, updated_at = CURRENT_TIMESTAMP()
+                WHEN NOT MATCHED THEN
+                    INSERT (company_id, endpoint_name, max_sync) 
+                    VALUES (S.comp_id, S.ep_name, S.max_sync)
+            """
+            bq_client.query(snapshot_query)
+    except Exception as e:
+        print(f"⚠️ Error actualizando etl_monitoring_snapshot: {str(e)}")
+
 def fix_nested_value(value, field_path="", known_array_fields=None):
     """
     Función recursiva para corregir valores anidados.
@@ -1548,6 +1571,7 @@ def execute_merge_or_insert(
             staging_refresh = bq_client.get_table(staging_table.reference)
             rows_written = staging_refresh.num_rows
             print(f"✅ OVERWRITE ejecutado: {dataset_final}.{table_final} reemplazado con {rows_written:,} filas en {overwrite_time:.1f}s")
+            update_monitoring_snapshot(bq_client, company_id, endpoint_name)
             return (True, overwrite_time, None)
 
         except Exception as e:
@@ -1651,6 +1675,7 @@ def execute_merge_or_insert(
             rows_inserted = staging_table_refresh.num_rows
             merge_time = time.time() - merge_start
             print(f"✅ INSERT directo ejecutado: {dataset_final}.{table_final} poblado con {rows_inserted:,} filas en {merge_time:.1f}s")
+            update_monitoring_snapshot(bq_client, company_id, endpoint_name)
             return (True, merge_time, None)
         except Exception as e:
             error_msg = clean_bq_error(e)
@@ -1727,6 +1752,7 @@ def execute_merge_or_insert(
                 bq_client.query(insert_trunc_sql).result()
                 merge_time = time.time() - merge_start
                 print(f"✅ TRUNCATE+INSERT ejecutado: {dataset_final}.{table_final} reemplazado en {merge_time:.1f}s")
+                update_monitoring_snapshot(bq_client, company_id, endpoint_name)
                 return (True, merge_time, None)
             except Exception as trunc_err:
                 merge_time = time.time() - merge_start
@@ -1786,6 +1812,7 @@ def execute_merge_or_insert(
             query_job.result()
             merge_time = time.time() - merge_start
             print(f"🔀 MERGE con Soft Delete ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
+            update_monitoring_snapshot(bq_client, company_id, endpoint_name)
             return (True, merge_time, None)
         except Exception as e:
             error_msg = clean_bq_error(e)

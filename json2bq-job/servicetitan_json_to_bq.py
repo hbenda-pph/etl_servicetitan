@@ -86,8 +86,10 @@ def process_company(row, endpoints_filter=None, dry_run=False):
     for endpoint_name, table_name, use_merge, is_production in endpoints_to_process:
         endpoint_start_time = time.time()
         json_filename = f"servicetitan_{table_name}.json"
-        temp_json = f"/tmp/{project_id}_{table_name}.json"
-        temp_fixed = f"/tmp/fixed_{project_id}_{table_name}.json"
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_json = os.path.join(temp_dir, f"{project_id}_{table_name}.json")
+        temp_fixed = os.path.join(temp_dir, f"fixed_{project_id}_{table_name}.json")
         
         if not is_production:
             merge_label = "DEV"
