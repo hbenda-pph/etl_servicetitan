@@ -329,13 +329,16 @@ def update_monitoring_snapshot(bq_client, company_id, endpoint_name, project_id,
                 ON T.company_id = S.comp_id AND T.endpoint_name = S.ep_name
                 WHEN MATCHED THEN
                     UPDATE SET 
+                        last_rows = T.actual_rows,
+                        last_duration = T.actual_duration,
+                        last_status = T.actual_status,
+                        actual_rows = S.rows_processed,
+                        actual_duration = S.duration_sec,
+                        actual_status = S.status,
                         max_sync = S.max_sync,
-                        updated_at = CURRENT_TIMESTAMP(),
-                        rows_processed = S.rows_processed,
-                        duration_seconds = S.duration_sec,
-                        status = S.status
+                        updated_at = CURRENT_TIMESTAMP()
                 WHEN NOT MATCHED THEN
-                    INSERT (company_id, endpoint_name, max_sync, rows_processed, duration_seconds, status, updated_at) 
+                    INSERT (company_id, endpoint_name, max_sync, actual_rows, actual_duration, actual_status, updated_at) 
                     VALUES (S.comp_id, S.ep_name, S.max_sync, S.rows_processed, S.duration_sec, S.status, CURRENT_TIMESTAMP())
             """
             # El .result() es CRUCIAL en Cloud Run para que el Job no termine antes que la query
