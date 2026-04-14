@@ -300,16 +300,21 @@ def update_monitoring_snapshot(bq_client, company_id, endpoint_name, project_id,
     """Actualiza la tabla etl_monitoring_snapshot cuando un ETL es exitoso o falla."""
     try:
         if company_id and endpoint_name:
-            # Intentar obtener el MAX(_etl_synced) real de la tabla de destino
+            # 🕒 1. Intentar obtener el MAX(_etl_synced) real de la tabla de destino
             max_sync_str = "CURRENT_TIMESTAMP()"
             try:
                 query_max = f"SELECT MAX(_etl_synced) as max_val FROM `{project_id}.{dataset_final}.{table_final}`"
-                res = list(bq_client.query(query_max).result())
-                if res and res[0]['max_val']:
-                    max_sync_str = f"CAST('{res[0]['max_val'].isoformat()}' AS TIMESTAMP)"
-            except Exception:
-                pass  # Fallback a CURRENT_TIMESTAMP() si la tabla no existe o error
+                query_job_max = bq_client.query(query_max)
+                res_max = list(query_job_max.result())
+                if res_max and res_max[0].max_val:
+                    # Formatear el timestamp para SQL
+                    max_val = res_max[0].max_val
+                    max_sync_str = f"CAST('{max_val.isoformat()}' AS TIMESTAMP)"
+            except Exception as e_max:
+                # Loggear pero no fallar, usar fallback
+                print(f"ℹ️ Info: No se pudo obtener MAX(_etl_synced) para {table_final}, usando CURRENT_TIMESTAMP. Error: {str(e_max)[:100]}")
             
+            # 🔄 2. Ejecutar MERGE de monitoreo de forma SÍNCRONA
             snapshot_query = f"""
                 MERGE `{METADATA_PROJECT}.management.etl_monitoring_snapshot` T
                 USING (
@@ -333,9 +338,12 @@ def update_monitoring_snapshot(bq_client, company_id, endpoint_name, project_id,
                     INSERT (company_id, endpoint_name, max_sync, rows_processed, duration_seconds, status, updated_at) 
                     VALUES (S.comp_id, S.ep_name, S.max_sync, S.rows_processed, S.duration_sec, S.status, CURRENT_TIMESTAMP())
             """
-            bq_client.query(snapshot_query)
+            # El .result() es CRUCIAL en Cloud Run para que el Job no termine antes que la query
+            query_job = bq_client.query(snapshot_query)
+            query_job.result()
+            print(f"📊 Snapshot actualizado: {endpoint_name} (rows: {rows}, duration: {duration:.1f}s)")
     except Exception as e:
-        print(f"⚠️ Error actualizando etl_monitoring_snapshot: {str(e)}")
+        print(f"❌ Error crítico actualizando etl_monitoring_snapshot: {str(e)}")
 
 def fix_nested_value(value, field_path="", known_array_fields=None):
     """
