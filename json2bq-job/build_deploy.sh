@@ -194,6 +194,8 @@ if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" --project="${PROJ
         --max-retries "${MAX_RETRIES}" \
         --task-timeout "${TASK_TIMEOUT}" \
         --set-env-vars "${ENV_VARS}" \
+        --command="" \
+        --args="" \
         ${PARALLEL_FLAGS}
 else
     echo "🆕 Job no existe — creando..."
@@ -207,6 +209,8 @@ else
         --max-retries "${MAX_RETRIES}" \
         --task-timeout "${TASK_TIMEOUT}" \
         --set-env-vars "${ENV_VARS}" \
+        --command="" \
+        --args="" \
         ${PARALLEL_FLAGS}
 fi
 

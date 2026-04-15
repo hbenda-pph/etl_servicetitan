@@ -129,7 +129,9 @@ if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" --project="${PROJ
         --cpu "${CPU}" \
         --max-retries "${MAX_RETRIES}" \
         --task-timeout "${TASK_TIMEOUT}" \
-        --set-env-vars "${ENV_VARS}"
+        --set-env-vars "${ENV_VARS}" \
+        --command="" \
+        --args=""
 else
     echo "🆕 Job no existe — creando..."
     gcloud run jobs create "${JOB_NAME}" \
@@ -141,7 +143,9 @@ else
         --cpu "${CPU}" \
         --max-retries "${MAX_RETRIES}" \
         --task-timeout "${TASK_TIMEOUT}" \
-        --set-env-vars "${ENV_VARS}"
+        --set-env-vars "${ENV_VARS}" \
+        --command="" \
+        --args=""
 fi
 
 if [ $? -eq 0 ]; then
