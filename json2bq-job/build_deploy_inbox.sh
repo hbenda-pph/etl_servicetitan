@@ -2,13 +2,25 @@
 
 # =============================================================================
 # SCRIPT DE BUILD & DEPLOY PARA ETL-INBOX-JSON2BQ-JOB (Cloud Run Job)
-# Proyecto específico: pph-inbox
+# Proyecto fijo: pph-inbox
+# Modo ETL: INBOX (compañías candidatas al consorcio)
+# =============================================================================
+#
+# Uso:
+#   ./build_deploy_inbox.sh
+#
+# Recursos (según proceso_etl.csv):
+#   Job2 (json2bq): 8GB / 4 CPU / 1 hora
+#   Scheduler     : Cada 6 horas y 15 minutos  (10 */6 * * *)
+#
+# Nota: INBOX no tiene ambientes DEV/QUA/PRO. Es un proceso temporal
+# e independiente. Opera como "dev+pro" en un solo proyecto pph-inbox.
 # =============================================================================
 
 set -e  # Salir si hay algún error
 
 # =============================================================================
-# CONFIGURACIÓN PARA PROYECTO INBOX
+# CONFIGURACIÓN FIJA DE INBOX
 # =============================================================================
 
 PROJECT_ID="pph-inbox"
@@ -17,170 +29,197 @@ SERVICE_ACCOUNT="etl-servicetitan@pph-inbox.iam.gserviceaccount.com"
 REGION="us-east1"
 IMAGE_NAME="etl-inbox-json2bq"
 IMAGE_TAG="gcr.io/${PROJECT_ID}/${IMAGE_NAME}"
-MEMORY="1Gi"
-CPU="1"
-MAX_RETRIES="1"
-TASK_TIMEOUT="1800"
-SCHEDULE_NAME="etl-inbox-json2bq-schedule"
-SCHEDULE_CRON="10 */6 * * *"
 
-echo "🚀 Iniciando Build & Deploy para ETL-INBOX-JSON2BQ-JOB"
-echo "======================================================="
-echo "📋 Configuración:"
-echo "   Proyecto: ${PROJECT_ID}"
-echo "   Job Name: ${JOB_NAME}"
-echo "   Región: ${REGION}"
-echo "   Imagen: ${IMAGE_TAG}"
-echo "   Service Account: ${SERVICE_ACCOUNT}"
-echo "   Memoria: ${MEMORY}"
-echo "   CPU: ${CPU}"
-echo "   Timeout: ${TASK_TIMEOUT}s"
-echo "   Schedule: ${SCHEDULE_CRON} (cada 6 horas)"
+# Recursos (proceso_etl.csv: Job2 INBOX = 8GB / 4 CPU / 1 hora)
+MEMORY="8Gi"
+CPU="4"
+TASK_TIMEOUT="3600"   # 1 hora
+MAX_RETRIES="1"
+
+# INBOX no necesita paralelismo (volumen reducido ~5 compañías)
+PARALLELISM="1"
+TASKS="1"
+
+# ETL_MODE para el Cloud Run Job (INBOX)
+ETL_MODE="inbox"
+
+# Scheduler: cada 6 horas y 15 minutos (Job2 corre después del Job1 que es cada 6 horas)
+SCHEDULE_NAME="etl-inbox-json2bq-schedule"
+SCHEDULE_CRON="15 */6 * * *"
+
+# =============================================================================
+# RESUMEN DE CONFIGURACIÓN
+# =============================================================================
+
+echo ""
+echo "🚀 Build & Deploy — ETL-INBOX-JSON2BQ-JOB (Modo: ${ETL_MODE^^})"
+echo "=================================================================="
+echo "📋 Proyecto   : ${PROJECT_ID}"
+echo "📋 Job Name   : ${JOB_NAME}"
+echo "📋 Región     : ${REGION}"
+echo "📋 Imagen     : ${IMAGE_TAG}"
+echo "📋 SA         : ${SERVICE_ACCOUNT}"
+echo "📋 Memoria    : ${MEMORY}"
+echo "📋 CPU        : ${CPU}"
+echo "📋 Timeout    : ${TASK_TIMEOUT}s ($(( TASK_TIMEOUT / 3600 )) hora(s))"
+echo "📋 Paralelismo: Sin paralelismo (1 tarea — volumen reducido INBOX)"
+echo "📋 ETL_MODE   : ${ETL_MODE}"
+echo "📋 Scheduler  : ${SCHEDULE_CRON} (cada 6h y 15min)"
 echo ""
 
-# Verificar que estamos en el directorio correcto
-if [ ! -f "servicetitan_inbox_json_to_bq.py" ]; then
-    echo "❌ Error: servicetitan_inbox_json_to_bq.py no encontrado."
+# =============================================================================
+# VERIFICACIONES PREVIAS
+# =============================================================================
+
+if [ ! -f "main.py" ]; then
+    echo "❌ Error: main.py no encontrado."
     echo "   Ejecuta este script desde el directorio json2bq-job/"
     exit 1
 fi
 
-# Verificar que gcloud está configurado
 if ! command -v gcloud &> /dev/null; then
     echo "❌ Error: gcloud CLI no está instalado o no está en el PATH"
     exit 1
 fi
 
-# Verificar proyecto activo
 CURRENT_PROJECT=$(gcloud config get-value project)
 if [ "$CURRENT_PROJECT" != "$PROJECT_ID" ]; then
     echo "⚠️  Proyecto actual: ${CURRENT_PROJECT}"
     echo "🔧 Configurando proyecto a: ${PROJECT_ID}"
-    gcloud config set project ${PROJECT_ID}
+    gcloud config set project "${PROJECT_ID}"
 fi
+
+# =============================================================================
+# PASO 1: BUILD (imagen Docker unificada)
+# =============================================================================
 
 echo ""
 echo "🔨 PASO 1: BUILD (Creando imagen Docker)"
 echo "=========================================="
-echo "📋 Usando Dockerfile.inbox para build..."
-# Crear config temporal de Cloud Build apuntando a Dockerfile.inbox
-cat > /tmp/cloudbuild_inbox.yaml <<BUILDEOF
-steps:
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-f', 'Dockerfile.inbox', '-t', '${IMAGE_TAG}', '.']
-images: ['${IMAGE_TAG}']
-BUILDEOF
-
-gcloud builds submit --config /tmp/cloudbuild_inbox.yaml .
+echo "ℹ️  Usando el Dockerfile estándar (mismo que build_deploy.sh)"
+echo "    El modo INBOX se activa por la variable ETL_MODE=${ETL_MODE}"
+echo ""
+gcloud builds submit --tag "${IMAGE_TAG}"
 
 if [ $? -eq 0 ]; then
     echo "✅ Build exitoso!"
 else
     echo "❌ Error en el build"
-    rm -f /tmp/cloudbuild_inbox.yaml
     exit 1
 fi
-rm -f /tmp/cloudbuild_inbox.yaml
+
+# =============================================================================
+# PASO 2: CREATE / UPDATE JOB
+# =============================================================================
 
 echo ""
-echo "🚀 PASO 2: DEPLOY (Creando/Actualizando Cloud Run Job)"
-echo "======================================================="
+echo "🚀 PASO 2: CREATE/UPDATE JOB"
+echo "============================="
 
-# Intentar actualizar el job existente, si no existe, crearlo
-if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID} &>/dev/null; then
-    echo "📝 Job existente encontrado. Actualizando..."
-    gcloud run jobs update ${JOB_NAME} \
-        --image ${IMAGE_TAG} \
-        --region ${REGION} \
-        --project ${PROJECT_ID} \
-        --service-account ${SERVICE_ACCOUNT} \
-        --memory ${MEMORY} \
-        --cpu ${CPU} \
-        --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT} \
-        --update-env-vars GCP_PROJECT=${PROJECT_ID}
+ENV_VARS="GCP_PROJECT=${PROJECT_ID},ETL_MODE=${ETL_MODE}"
+
+if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "📝 Job existe — actualizando..."
+    gcloud run jobs update "${JOB_NAME}" \
+        --image "${IMAGE_TAG}" \
+        --region "${REGION}" \
+        --project "${PROJECT_ID}" \
+        --service-account "${SERVICE_ACCOUNT}" \
+        --memory "${MEMORY}" \
+        --cpu "${CPU}" \
+        --max-retries "${MAX_RETRIES}" \
+        --task-timeout "${TASK_TIMEOUT}" \
+        --set-env-vars "${ENV_VARS}"
 else
-    echo "📝 Job no existe. Creando nuevo job..."
-    gcloud run jobs create ${JOB_NAME} \
-        --image ${IMAGE_TAG} \
-        --region ${REGION} \
-        --project ${PROJECT_ID} \
-        --service-account ${SERVICE_ACCOUNT} \
-        --memory ${MEMORY} \
-        --cpu ${CPU} \
-        --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${PROJECT_ID}
+    echo "🆕 Job no existe — creando..."
+    gcloud run jobs create "${JOB_NAME}" \
+        --image "${IMAGE_TAG}" \
+        --region "${REGION}" \
+        --project "${PROJECT_ID}" \
+        --service-account "${SERVICE_ACCOUNT}" \
+        --memory "${MEMORY}" \
+        --cpu "${CPU}" \
+        --max-retries "${MAX_RETRIES}" \
+        --task-timeout "${TASK_TIMEOUT}" \
+        --set-env-vars "${ENV_VARS}"
 fi
 
 if [ $? -eq 0 ]; then
-    echo "✅ Deploy exitoso!"
+    echo "✅ Job creado/actualizado!"
 else
-    echo "❌ Error en el deploy"
+    echo "❌ Error creando/actualizando job"
     exit 1
 fi
 
-echo ""
-echo "⏰ PASO 3: CONFIGURAR SCHEDULE (Cloud Scheduler)"
-echo "=================================================="
+# =============================================================================
+# PASO 3: SCHEDULER
+# INBOX: Corre cada 6 horas y 15 minutos, siempre (es el job oficial de INBOX)
+# =============================================================================
 
-# Crear o actualizar el schedule
-# Nota: Usar el formato correcto de la API REST de Cloud Run Jobs
-# El formato correcto es: projects/{project}/locations/{location}/jobs/{job}:run
+echo ""
+echo "⏰ PASO 3: CONFIGURAR SCHEDULER"
+echo "================================"
+
 JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
 
-if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
-    echo "📝 Schedule existente encontrado. Actualizando..."
-    gcloud scheduler jobs update http ${SCHEDULE_NAME} \
-        --location=${REGION} \
-        --project=${PROJECT_ID} \
+if gcloud scheduler jobs describe "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "📝 Scheduler existe — actualizando..."
+    gcloud scheduler jobs update http "${SCHEDULE_NAME}" \
+        --location="${REGION}" \
+        --project="${PROJECT_ID}" \
         --schedule="${SCHEDULE_CRON}" \
         --uri="${JOB_URI}" \
         --http-method=POST \
-        --oauth-service-account-email=${SERVICE_ACCOUNT} \
+        --oauth-service-account-email="${SERVICE_ACCOUNT}" \
         --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform \
         --time-zone="America/New_York"
 else
-    echo "📝 Schedule no existe. Creando nuevo schedule..."
-    gcloud scheduler jobs create http ${SCHEDULE_NAME} \
-        --location=${REGION} \
-        --project=${PROJECT_ID} \
+    echo "🆕 Scheduler no existe — creando..."
+    gcloud scheduler jobs create http "${SCHEDULE_NAME}" \
+        --location="${REGION}" \
+        --project="${PROJECT_ID}" \
         --schedule="${SCHEDULE_CRON}" \
         --uri="${JOB_URI}" \
         --http-method=POST \
-        --oauth-service-account-email=${SERVICE_ACCOUNT} \
+        --oauth-service-account-email="${SERVICE_ACCOUNT}" \
         --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform \
         --time-zone="America/New_York"
 fi
 
 if [ $? -eq 0 ]; then
-    echo "✅ Schedule configurado exitosamente!"
+    echo "✅ Scheduler INBOX configurado: ${SCHEDULE_CRON} (cada 6h 15min)"
 else
-    echo "⚠️  Advertencia: Error configurando schedule (puede que Cloud Scheduler API no esté habilitada)"
-    echo "   Puedes configurarlo manualmente más tarde"
+    echo "⚠️  Error configurando scheduler. Verifica que Cloud Scheduler API esté habilitada."
 fi
 
+# =============================================================================
+# RESUMEN FINAL
+# =============================================================================
+
 echo ""
-echo "🎉 ¡DEPLOY COMPLETADO EXITOSAMENTE!"
-echo "===================================="
+echo "🎉 ¡DEPLOY INBOX COMPLETADO!"
+echo "============================="
 echo ""
-echo "📊 Para ejecutar el Job:"
+echo "📋 ETL_MODE   : ${ETL_MODE^^}"
+echo "💾 Recursos   : ${MEMORY} / ${CPU} CPU / ${TASK_TIMEOUT}s"
+echo "⏰ Scheduler  : ${SCHEDULE_CRON}"
+echo "📊 Fuente     : pph-inbox.settings.companies"
+echo ""
+echo "📊 Ejecutar el Job manualmente:"
 echo "   gcloud run jobs execute ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID}"
 echo ""
-echo "🔧 Para ver logs del último Job:"
+echo "🔧 Ver logs:"
 echo "   gcloud logging read \"resource.type=cloud_run_job AND resource.labels.job_name=${JOB_NAME}\" --limit=50 --format=\"table(timestamp,severity,textPayload)\" --project=${PROJECT_ID}"
 echo ""
-echo "📋 Para ver detalles del Job:"
-echo "   gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID}"
-echo ""
-echo "⏰ Para ver detalles del Schedule:"
+echo "⏰ Ver detalles del Scheduler:"
 echo "   gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID}"
 echo ""
-echo "📝 Notas:"
-echo "   - Este job procesa compañías INBOX desde la tabla companies_inbox"
-echo "   - Los datos se cargan en BigQuery del proyecto pph-inbox"
-echo "   - Script: servicetitan_inbox_json_to_bq.py"
-echo "   - Ejecución automática: cada 6 horas (${SCHEDULE_CRON})"
-echo "   - Recursos reducidos: ${MEMORY} memoria, ${CPU} CPU (una compañía nueva con pocos registros)"
+echo "🧪 Modo TEST desde Cloud Shell (sin desplegar):"
+echo "   python main.py --mode test --company-id 1 --endpoint locations --dry-run"
 echo ""
-
+echo "📝 Notas INBOX:"
+echo "   - Procesa compañías candidatas al consorcio (~5 compañías en evaluación)"
+echo "   - Fuente de datos: pph-inbox.settings.companies"
+echo "   - Sin paralelismo (volumen reducido vs ALL con 30+ compañías)"
+echo "   - Mismo código que ALL — diferenciado solo por ETL_MODE=inbox"
+echo ""
