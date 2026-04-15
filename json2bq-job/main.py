@@ -104,8 +104,8 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
 
     if endpoints_override:
         endpoints_to_process = [
-            (ep_name, tbl_name)
-            for ep_name, tbl_name in all_endpoints
+            (ep_name, tbl_name, use_merge, is_prod)
+            for ep_name, tbl_name, use_merge, is_prod in all_endpoints
             if ep_name in endpoints_override or tbl_name in endpoints_override
         ]
         if not endpoints_to_process:
@@ -118,7 +118,7 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
 
     endpoints_count = 0
 
-    for endpoint_name, table_name in endpoints_to_process:
+    for endpoint_name, table_name, use_merge, is_production in endpoints_to_process:
         endpoints_count += 1
         ep_start       = time.time()
         json_filename  = f"servicetitan_{table_name}.json"
@@ -315,6 +315,8 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
             company_name=company_name,
             endpoint_name=endpoint_name,
             type_mismatches=type_mismatches,
+            use_merge=use_merge,
+            is_production=is_production,
         )
 
         if merge_success:
