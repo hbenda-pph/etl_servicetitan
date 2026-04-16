@@ -160,9 +160,35 @@ gcloud run jobs update etl-json2bq-job \
 
 ### Función Orquestadora
 
-#### Deploy (No requiere Build)
+#### ⚡ Método Recomendado: Script Automatizado
+
 ```bash
-gcloud functions deploy orchestrate-etl-jobs \
+cd orchestrate_etl
+
+# Deploy según ambiente activo de gcloud
+./build_deploy.sh
+
+# O especificar ambiente explícitamente
+./build_deploy.sh dev    # Deploy en DEV
+./build_deploy.sh qua    # Deploy en QUA
+./build_deploy.sh pro    # Deploy en PRO
+```
+
+El script `build_deploy.sh`:
+- ✅ Detecta automáticamente el ambiente
+- ✅ Configura la función con los parámetros correctos
+- ✅ Crea/actualiza el scheduler automáticamente (solo en PRO)
+- ✅ Establece variables de entorno correctamente
+- ✅ Soporta múltiples ambientes (DEV, QUA, PRO)
+
+#### Deploy Manual (Alternativa)
+
+Si prefieres hacer el deploy manualmente:
+
+**DEV:**
+```bash
+cd orchestrate_etl
+gcloud functions deploy orchestrate-etl-jobs-dev \
   --gen2 \
   --project platform-partners-des \
   --runtime python311 \
@@ -173,6 +199,25 @@ gcloud functions deploy orchestrate-etl-jobs \
   --service-account etl-servicetitan@platform-partners-des.iam.gserviceaccount.com \
   --memory 4Gi \
   --timeout 3600s \
+  --set-env-vars GCP_PROJECT=platform-partners-des \
+  --allow-unauthenticated
+```
+
+**PRO:**
+```bash
+cd orchestrate_etl
+gcloud functions deploy orchestrate-etl-jobs \
+  --gen2 \
+  --project constant-height-455614-i0 \
+  --runtime python311 \
+  --trigger-http \
+  --entry-point orchestrate_etl_jobs \
+  --source . \
+  --region us-east1 \
+  --service-account etl-servicetitan@constant-height-455614-i0.iam.gserviceaccount.com \
+  --memory 4Gi \
+  --timeout 3600s \
+  --set-env-vars GCP_PROJECT=platform-partners-pro \
   --allow-unauthenticated
 ```
 
@@ -420,23 +465,46 @@ curl -X POST https://us-east1-platform-partners-des.cloudfunctions.net/orchestra
 ```
 
 ### Configuración de Scheduler
-```bash
-# Crear job de scheduler (cada 6 horas)
-gcloud scheduler jobs create http etl-orchestration-schedule \
-  --schedule="0 */6 * * *" \
-  --uri="https://us-east1-platform-partners-des.cloudfunctions.net/orchestrate-etl-jobs" \
-  --http-method=POST \
-  --location=us-east1 \
-  --oidc-service-account-email=etl-servicetitan@platform-partners-des.iam.gserviceaccount.com
 
+**Nota:** El script `build_deploy.sh` configura el scheduler automáticamente en PRO. Si necesitas hacerlo manualmente:
+
+**PRO:**
+```bash
+# Obtener URL de la función
+FUNCTION_URL=$(gcloud functions describe orchestrate-etl-jobs --gen2 --region=us-east1 --project=constant-height-455614-i0 --format="value(serviceConfig.uri)")
+
+# Obtener URL pública de la función
+FUNCTION_URL=$(gcloud functions describe orchestrate-etl-jobs --gen2 --region=us-east1 --project=constant-height-455614-i0 --format="value(serviceConfig.uri)")
+
+# Crear/actualizar scheduler (cada 6 horas)
+# Usar oidcToken (igual que en DEV) para poder usar URL pública
+gcloud scheduler jobs create http orchestrate-etl-jobs-schedule \
+  --location=us-east1 \
+  --project=constant-height-455614-i0 \
+  --schedule="0 */6 * * *" \
+  --uri="${FUNCTION_URL}" \
+  --http-method=POST \
+  --oidc-service-account-email=etl-servicetitan@constant-height-455614-i0.iam.gserviceaccount.com
+```
+
+**⚠️ IMPORTANTE:** Después de configurar la función de orquestación, **desactiva los schedules individuales** de los jobs:
+
+```bash
+# Pausar schedules individuales en PRO
+gcloud scheduler jobs pause etl-st2json-schedule --location=us-east1 --project=constant-height-455614-i0
+gcloud scheduler jobs pause etl-json2bq-schedule --location=us-east1 --project=constant-height-455614-i0
+```
+
+**Comandos útiles:**
+```bash
 # Verificar jobs de scheduler
-gcloud scheduler jobs list --location=us-east1
+gcloud scheduler jobs list --location=us-east1 --project=constant-height-455614-i0
 
 # Ejecutar manualmente el scheduler
-gcloud scheduler jobs run etl-orchestration-schedule --location=us-east1
+gcloud scheduler jobs run orchestrate-etl-jobs-schedule --location=us-east1 --project=constant-height-455614-i0
 
 # Verificar estado del scheduler
-gcloud scheduler jobs describe etl-orchestration-schedule --location=us-east1
+gcloud scheduler jobs describe orchestrate-etl-jobs-schedule --location=us-east1 --project=constant-height-455614-i0
 ```
 
 ## 🔧 Troubleshooting
@@ -459,3 +527,8 @@ gcloud scheduler jobs describe etl-orchestration-schedule --location=us-east1
 - El MERGE maneja Soft Delete para registros eliminados
 - La orquestación es síncrona (espera a que ambos Jobs terminen)
 - Los logs están optimizados para facilitar el monitoreo
+
+
+## 16 de abril 2026
+### Cambio en el metodo multitasking para ambos Jobs
+Usaré este comentario para marcar un COMMIT antes de empezar con el Upgrade.
