@@ -189,6 +189,82 @@ def load_endpoints_from_metadata():
         print(f"⚠️ [load_endpoints_from_metadata] Error cargando endpoints desde metadata: {str(e)}")
         return []
 
+def get_balanced_tasks(bq_client, results, task_count, task_index):
+    """
+    Distribuye las compañías entre las tareas de Cloud Run usando un algoritmo
+    Greedy para balancear la carga basada en métricas históricas de duración.
+    
+    Args:
+        bq_client: Cliente de BigQuery para obtener métricas.
+        results: Lista de filas (Row objects) con las compañías activas.
+        task_count: Número total de tareas (bins).
+        task_index: Índice de la tarea actual (0-based).
+    
+    Returns:
+        Lista de filas (Row objects) asignadas a esta tarea.
+    """
+    if task_count <= 1:
+        return results
+
+    # 1. Obtener pesos (duración total acumulada) de BigQuery
+    # IMPORTANTE: Se agrupa por company_id para sumar la duración de todos sus endpoints
+    weights = {}
+    try:
+        query = f"""
+            SELECT company_id, SUM(actual_duration) as total_duration
+            FROM `{METADATA_PROJECT}.management.etl_monitoring_snapshot`
+            WHERE updated_at >= CURRENT_TIMESTAMP() - INTERVAL 7 DAY
+            GROUP BY company_id
+        """
+        query_job = bq_client.query(query)
+        for row in query_job.result():
+            weights[int(row.company_id)] = float(row.total_duration)
+    except Exception as e:
+        print(f"⚠️  [get_balanced_tasks] No se pudieron obtener pesos históricos: {str(e)[:100]}")
+
+    # 2. Asignar peso por defecto a compañías sin historial (promedio o 60s)
+    # El promedio ayuda a que compañías nuevas no se amontonen en una sola tarea
+    fallback_weight = sum(weights.values()) / len(weights) if weights else 60.0
+    
+    # Preparar lista de compañías con su peso detectado o fallback
+    company_data = []
+    for row in results:
+        cid = int(row.company_id)
+        w = weights.get(cid, fallback_weight)
+        company_data.append({'row': row, 'weight': w})
+
+    # 3. Algoritmo Greedy Bin Packing
+    # Ordenar por peso descendente es la base del algoritmo Greedy para mejor balance
+    company_data.sort(key=lambda x: x['weight'], reverse=True)
+    
+    bins = [[] for _ in range(task_count)]
+    bin_weights = [0.0] * task_count
+    
+    for item in company_data:
+        # Encontrar el bin (tarea) que actualmente tiene menos carga acumulada
+        min_bin_idx = bin_weights.index(min(bin_weights))
+        bins[min_bin_idx].append(item['row'])
+        bin_weights[min_bin_idx] += item['weight']
+    
+    # 4. Seleccionar el bin correspondiente a esta tarea
+    assigned_companies = bins[task_index]
+    
+    # Estadísticas para el log
+    total_w = sum(bin_weights)
+    avg_w   = total_w / task_count if task_count > 0 else 0
+    this_w  = bin_weights[task_index]
+    diff_pct = ((this_w - avg_w) / avg_w * 100) if avg_w > 0 else 0
+    
+    print(f"\n⚖️  BALANCEO INTELIGENTE (Greedy Partitioning)")
+    print(f"   Tarea actual: {task_index + 1} de {task_count}")
+    print(f"   Carga estimada t{task_index+1}: {this_w:.1f}s (Dif vs promedio: {diff_pct:+.1f}%)")
+    print(f"   Compañías asignadas: {len(assigned_companies)}")
+    
+    # Reordenar por company_id para mantener consistencia visual en los logs
+    assigned_companies.sort(key=lambda x: x.company_id)
+    
+    return assigned_companies
+
 
 import functools
 

@@ -173,6 +173,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
             --schedule="${SCHEDULE_CRON}" \
             --uri="${FUNCTION_URL}" \
             --http-method=POST \
+            --attempt-deadline=1800s \
             --oidc-service-account-email=${SERVICE_ACCOUNT}
     else
         echo "🆕 Scheduler no existe, creando..."
@@ -182,6 +183,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
             --schedule="${SCHEDULE_CRON}" \
             --uri="${FUNCTION_URL}" \
             --http-method=POST \
+            --attempt-deadline=1800s \
             --oidc-service-account-email=${SERVICE_ACCOUNT}
     fi
     

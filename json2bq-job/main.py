@@ -34,6 +34,7 @@ from servicetitan_common import (
     validate_json_file,
     align_schemas_before_merge,
     execute_merge_or_insert,
+    get_balanced_tasks,
 )
 
 # =============================================================================
@@ -390,15 +391,10 @@ def run_all(args, log_callback):
     results = list(client.query(query).result())
     total   = len(results)
 
-    # Partición para modo paralelo
+    # Distribución de carga para modo paralelo
     if is_parallel:
-        companies_per_task = total // task_count
-        remainder          = total % task_count
-        start_idx = task_index * companies_per_task + min(task_index, remainder)
-        end_idx   = start_idx + companies_per_task + (1 if task_index < remainder else 0)
-        results   = results[start_idx:end_idx]
+        results = get_balanced_tasks(client, results, task_count, task_index)
         total_assigned = len(results)
-        print(f"📊 Total compañías: {total} | Asignadas a esta tarea: {total_assigned}")
     else:
         total_assigned = total
         print(f"📊 Total compañías a procesar: {total}")
