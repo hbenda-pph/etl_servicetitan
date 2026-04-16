@@ -665,16 +665,11 @@ Ejemplos:
 def main():
     args = parse_args()
 
-    # Resolver modo: argparse tiene prioridad; si no, usar variable de entorno
-    mode = args.mode or os.environ.get("ETL_MODE", "").lower()
-
-    if not mode:
-        print(
-            "❌ No se especificó modo de ejecución.\n"
-            "   Usa --mode {all|inbox|test} o define la variable ETL_MODE.\n"
-            "   Ejecuta 'python main.py --help' para ver ejemplos."
-        )
-        raise SystemExit(1)
+    # Resolver modo:
+    # 1. --mode explícito (argparse)
+    # 2. Variable de entorno ETL_MODE (inyectada por Cloud Run Job)
+    # 3. Default: 'test' (si se corre desde Cloud Shell sin nada configurado)
+    mode = args.mode or os.environ.get("ETL_MODE", "").lower() or "test"
 
     if mode not in ("all", "inbox", "test"):
         print(f"❌ Modo inválido: '{mode}'. Debe ser 'all', 'inbox' o 'test'.")

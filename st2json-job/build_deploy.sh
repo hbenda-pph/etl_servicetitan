@@ -3,150 +3,157 @@
 # =============================================================================
 # SCRIPT DE BUILD & DEPLOY PARA ETL-ST2JSON-JOB (Cloud Run Job)
 # Multi-Environment: DEV, QUA, PRO
+# Modo ETL: ALL (consorcio — pph-central)
+# =============================================================================
+#
+# Uso:
+#   ./build_deploy.sh [dev|qua|pro]
+#   ./build_deploy.sh        # Detecta el ambiente desde el proyecto activo de gcloud
+#
+# Recursos por ambiente (según proceso_etl.csv):
+#   PRO: 8GB / 4 CPU / 1 hora  | Paralelismo 3 tasks | Scheduler: en el Orquestador
+#   QUA: 8GB / 4 CPU / 1 hora  | Paralelismo 3 tasks | Scheduler: 1 corrida (próxima hora)
+#   DEV: 8GB / 4 CPU / 1 hora  | Sin paralelismo     | Sin Scheduler (manual en Cloud Shell)
+#
 # =============================================================================
 
 set -e  # Salir si hay algún error
 
 # =============================================================================
-# CONFIGURACIÓN DE AMBIENTES
+# ARRAY DE RECURSOS POR AMBIENTE
 # =============================================================================
 
-# Detectar proyecto activo de gcloud
+declare -A RESOURCES_MEMORY=(      [dev]="8Gi"   [qua]="8Gi"   [pro]="8Gi"   )
+declare -A RESOURCES_CPU=(         [dev]="4"      [qua]="4"      [pro]="4"     )
+declare -A RESOURCES_TIMEOUT=(     [dev]="3600"   [qua]="3600"   [pro]="3600"  )  # 1 hora
+declare -A RESOURCES_PARALLELISM=( [dev]="1"      [qua]="3"      [pro]="3"     )
+declare -A RESOURCES_TASKS=(       [dev]="1"      [qua]="3"      [pro]="3"     )
+
+# =============================================================================
+# DETECCIÓN / VALIDACIÓN DE AMBIENTE
+# =============================================================================
+
 CURRENT_PROJECT=$(gcloud config get-value project 2>/dev/null)
 
-# Si se proporciona parámetro, usarlo; si no, detectar automáticamente
 if [ -n "$1" ]; then
-    # Parámetro proporcionado explícitamente
-    ENVIRONMENT="$1"
-    ENVIRONMENT=$(echo "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]')  # Convertir a minúsculas
-    
-    # Validar ambiente
+    ENVIRONMENT=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+
     if [[ ! "$ENVIRONMENT" =~ ^(dev|qua|pro)$ ]]; then
-        echo "❌ Error: Ambiente inválido '$ENVIRONMENT'"
+        echo "❌ Ambiente inválido: '$ENVIRONMENT'"
         echo "Uso: ./build_deploy.sh [dev|qua|pro]"
         echo ""
         echo "Ejemplos:"
-        echo "  ./build_deploy.sh dev    # Deploy en DEV (platform-partners-des)"
-        echo "  ./build_deploy.sh qua    # Deploy en QUA (platform-partners-qua)"
-        echo "  ./build_deploy.sh pro    # Deploy en PRO (platform-partners-pro)"
-        echo ""
-        echo "O ejecuta sin parámetros para usar el proyecto activo de gcloud"
+        echo "  ./build_deploy.sh dev    # DEV (platform-partners-des)"
+        echo "  ./build_deploy.sh qua    # QUA (platform-partners-qua)"
+        echo "  ./build_deploy.sh pro    # PRO (constant-height-455614-i0)"
         exit 1
     fi
 else
-    # Detectar automáticamente según el proyecto activo
     echo "🔍 Detectando ambiente desde proyecto activo de gcloud..."
-    
     case "$CURRENT_PROJECT" in
-        platform-partners-des)
-            ENVIRONMENT="dev"
-            echo "✅ Detectado: DEV (platform-partners-des)"
-            ;;
-        platform-partners-qua)
-            ENVIRONMENT="qua"
-            echo "✅ Detectado: QUA (platform-partners-qua)"
-            ;;
-        platform-partners-pro)
-            ENVIRONMENT="pro"
-            echo "✅ Detectado: PRO (platform-partners-pro)"
-            ;;
+        platform-partners-des)     ENVIRONMENT="dev"; echo "✅ Detectado: DEV" ;;
+        platform-partners-qua)     ENVIRONMENT="qua"; echo "✅ Detectado: QUA" ;;
+        constant-height-455614-i0) ENVIRONMENT="pro"; echo "✅ Detectado: PRO" ;;
         *)
-            echo "⚠️  Proyecto activo: ${CURRENT_PROJECT}"
-            echo "⚠️  No se reconoce el proyecto. Usando DEV por defecto."
+            echo "⚠️  Proyecto activo: ${CURRENT_PROJECT} — no reconocido. Usando DEV por defecto."
             ENVIRONMENT="dev"
             ;;
     esac
 fi
 
-# Configuración según ambiente
+# =============================================================================
+# CONFIGURACIÓN POR AMBIENTE
+# =============================================================================
+
 case "$ENVIRONMENT" in
     dev)
         PROJECT_ID="platform-partners-des"
+        PROJECT_NAME="platform-partners-des"
         JOB_NAME="etl-st2json-job-dev"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-des.iam.gserviceaccount.com"
         ;;
     qua)
         PROJECT_ID="platform-partners-qua"
+        PROJECT_NAME="platform-partners-qua"
         JOB_NAME="etl-st2json-job-qua"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-qua.iam.gserviceaccount.com"
         ;;
     pro)
-        PROJECT_ID="constant-height-455614-i0"  # Project ID real de PRO (necesario para build y comandos gcloud)
-        PROJECT_NAME="platform-partners-pro"    # Project name (para variable de entorno GCP_PROJECT)
+        PROJECT_ID="constant-height-455614-i0"
+        PROJECT_NAME="platform-partners-pro"
         JOB_NAME="etl-st2json-job"
         SERVICE_ACCOUNT="etl-servicetitan@${PROJECT_ID}.iam.gserviceaccount.com"
         ;;
 esac
 
-# Para DEV y QUA, PROJECT_NAME = PROJECT_ID (son iguales)
-if [ -z "$PROJECT_NAME" ]; then
-    PROJECT_NAME="${PROJECT_ID}"
-fi
-
-# GCP_PROJECT para variable de entorno: usar PROJECT_NAME para que Python lea la tabla correcta
-GCP_PROJECT_ENV="${PROJECT_NAME}"
+# Leer recursos del array según ambiente
+MEMORY="${RESOURCES_MEMORY[$ENVIRONMENT]}"
+CPU="${RESOURCES_CPU[$ENVIRONMENT]}"
+TASK_TIMEOUT="${RESOURCES_TIMEOUT[$ENVIRONMENT]}"
+PARALLELISM="${RESOURCES_PARALLELISM[$ENVIRONMENT]}"
+TASKS="${RESOURCES_TASKS[$ENVIRONMENT]}"
 
 REGION="us-east1"
 IMAGE_NAME="etl-st2json"
 IMAGE_TAG="gcr.io/${PROJECT_ID}/${IMAGE_NAME}"
-MEMORY="4Gi"
-CPU="4"
 MAX_RETRIES="1"
-TASK_TIMEOUT="1800"
+ETL_MODE="all"
 
-# Configuración de paralelismo (Cloud Run Jobs)
-# PARALLELISM: Número de tareas que se ejecutan simultáneamente
-# TASKS: Número total de tareas a ejecutar
-# Ejemplo: Si tienes 30 compañías y TASKS=3, cada tarea procesará ~10 compañías
-# Para desactivar paralelismo, establecer ambos a 1
-PARALLELISM="3"  # Ejecutar 3 tareas en paralelo
-TASKS="3"         # Total de 3 tareas (cada una procesa ~10 compañías si hay 30)
+# =============================================================================
+# RESUMEN DE CONFIGURACIÓN
+# =============================================================================
 
-echo "🚀 Iniciando Build & Deploy para ETL-ST2JSON-JOB"
-echo "=================================================="
-echo "🌍 AMBIENTE: ${ENVIRONMENT^^}"
-echo "📋 Configuración:"
-echo "   Proyecto ID: ${PROJECT_ID}"
-if [ "$ENVIRONMENT" = "pro" ]; then
-    echo "   Proyecto Name: ${PROJECT_NAME}"
-fi
-echo "   Job Name: ${JOB_NAME}"
-echo "   Región: ${REGION}"
-echo "   Imagen: ${IMAGE_TAG}"
-echo "   Service Account: ${SERVICE_ACCOUNT}"
-echo "   Memoria: ${MEMORY}"
-echo "   CPU: ${CPU}"
-echo "   Timeout: ${TASK_TIMEOUT}s"
+echo ""
+echo "🚀 Build & Deploy — ETL-ST2JSON-JOB (Modo: ${ETL_MODE^^})"
+echo "==========================================================="
+echo "🌍 AMBIENTE   : ${ENVIRONMENT^^}"
+echo "📋 Proyecto ID: ${PROJECT_ID}"
+echo "📋 Project Name: ${PROJECT_NAME}"
+echo "📋 Job Name   : ${JOB_NAME}"
+echo "📋 Región     : ${REGION}"
+echo "📋 Imagen     : ${IMAGE_TAG}"
+echo "📋 SA         : ${SERVICE_ACCOUNT}"
+echo "📋 Memoria    : ${MEMORY}"
+echo "📋 CPU        : ${CPU}"
+echo "📋 Timeout    : ${TASK_TIMEOUT}s ($(( TASK_TIMEOUT / 3600 )) hora(s))"
 if [ "$TASKS" != "1" ]; then
-    echo "   🚀 Paralelismo: ${PARALLELISM} tareas simultáneas, ${TASKS} tareas totales"
+    echo "📋 Paralelismo: ${PARALLELISM} simultáneas / ${TASKS} tareas totales"
+else
+    echo "📋 Paralelismo: Sin paralelismo (1 tarea)"
 fi
+echo "📋 ETL_MODE   : ${ETL_MODE}"
 echo ""
 
-# Verificar que estamos en el directorio correcto
-if [ ! -f "servicetitan_all_st_to_json.py" ]; then
-    echo "❌ Error: servicetitan_all_st_to_json.py no encontrado."
+# =============================================================================
+# VERIFICACIONES PREVIAS
+# =============================================================================
+
+if [ ! -f "main.py" ]; then
+    echo "❌ Error: main.py no encontrado."
     echo "   Ejecuta este script desde el directorio st2json-job/"
     exit 1
 fi
 
-# Verificar que gcloud está configurado
 if ! command -v gcloud &> /dev/null; then
     echo "❌ Error: gcloud CLI no está instalado o no está en el PATH"
     exit 1
 fi
 
-# Verificar proyecto activo
 CURRENT_PROJECT=$(gcloud config get-value project)
 if [ "$CURRENT_PROJECT" != "$PROJECT_ID" ]; then
     echo "⚠️  Proyecto actual: ${CURRENT_PROJECT}"
     echo "🔧 Configurando proyecto a: ${PROJECT_ID}"
-    gcloud config set project ${PROJECT_ID}
+    gcloud config set project "${PROJECT_ID}"
 fi
+
+# =============================================================================
+# PASO 1: BUILD
+# =============================================================================
 
 echo ""
 echo "🔨 PASO 1: BUILD (Creando imagen Docker)"
 echo "=========================================="
-gcloud builds submit --tag ${IMAGE_TAG}
+gcloud builds submit --tag "${IMAGE_TAG}"
 
 if [ $? -eq 0 ]; then
     echo "✅ Build exitoso!"
@@ -155,130 +162,156 @@ else
     exit 1
 fi
 
+# =============================================================================
+# PASO 2: CREATE / UPDATE JOB
+# =============================================================================
+
 echo ""
 echo "🚀 PASO 2: CREATE/UPDATE JOB"
 echo "============================="
 
-# Verificar si el job ya existe
-if gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID} &> /dev/null; then
-    echo "📝 Job existe, actualizando..."
-    # Construir comando base
-    UPDATE_CMD="gcloud run jobs update ${JOB_NAME} \
-        --image ${IMAGE_TAG} \
-        --region ${REGION} \
-        --project ${PROJECT_ID} \
-        --service-account ${SERVICE_ACCOUNT} \
-        --memory ${MEMORY} \
-        --cpu ${CPU} \
-        --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT} \
-        --update-env-vars GCP_PROJECT=${GCP_PROJECT_ENV}"
-    
-    # Agregar paralelismo si está configurado
-    if [ "$TASKS" != "1" ]; then
-        UPDATE_CMD="${UPDATE_CMD} --parallelism ${PARALLELISM} --tasks ${TASKS}"
-    fi
-    
-    eval ${UPDATE_CMD}
+PARALLEL_FLAGS=""
+if [ "$TASKS" != "1" ]; then
+    PARALLEL_FLAGS="--parallelism ${PARALLELISM} --tasks ${TASKS}"
+fi
+
+ENV_VARS="GCP_PROJECT=${PROJECT_NAME},ETL_MODE=${ETL_MODE}"
+
+if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "📝 Job existe — actualizando..."
+    gcloud run jobs update "${JOB_NAME}" \
+        --image "${IMAGE_TAG}" \
+        --region "${REGION}" \
+        --project "${PROJECT_ID}" \
+        --service-account "${SERVICE_ACCOUNT}" \
+        --memory "${MEMORY}" \
+        --cpu "${CPU}" \
+        --max-retries "${MAX_RETRIES}" \
+        --task-timeout "${TASK_TIMEOUT}" \
+        --set-env-vars "${ENV_VARS}" \
+        --command="" \
+        --args="" \
+        ${PARALLEL_FLAGS}
 else
-    echo "🆕 Job no existe, creando..."
-    # Construir comando base
-    CREATE_CMD="gcloud run jobs create ${JOB_NAME} \
-        --image ${IMAGE_TAG} \
-        --region ${REGION} \
-        --project ${PROJECT_ID} \
-        --service-account ${SERVICE_ACCOUNT} \
-        --memory ${MEMORY} \
-        --cpu ${CPU} \
-        --max-retries ${MAX_RETRIES} \
-        --task-timeout ${TASK_TIMEOUT} \
-        --set-env-vars GCP_PROJECT=${GCP_PROJECT_ENV}"
-    
-    # Agregar paralelismo si está configurado
-    if [ "$TASKS" != "1" ]; then
-        CREATE_CMD="${CREATE_CMD} --parallelism ${PARALLELISM} --tasks ${TASKS}"
-    fi
-    
-    eval ${CREATE_CMD}
+    echo "🆕 Job no existe — creando..."
+    gcloud run jobs create "${JOB_NAME}" \
+        --image "${IMAGE_TAG}" \
+        --region "${REGION}" \
+        --project "${PROJECT_ID}" \
+        --service-account "${SERVICE_ACCOUNT}" \
+        --memory "${MEMORY}" \
+        --cpu "${CPU}" \
+        --max-retries "${MAX_RETRIES}" \
+        --task-timeout "${TASK_TIMEOUT}" \
+        --set-env-vars "${ENV_VARS}" \
+        --command="" \
+        --args="" \
+        ${PARALLEL_FLAGS}
 fi
 
 if [ $? -eq 0 ]; then
-    echo "✅ Job creado/actualizado exitosamente!"
+    echo "✅ Job creado/actualizado!"
 else
     echo "❌ Error creando/actualizando job"
     exit 1
 fi
 
+# =============================================================================
+# PASO 3: SCHEDULER
+#
+# PRO  → el Scheduler lo gestiona el Orquestador externo.
+# QUA  → 1 sola corrida de prueba (próxima hora en punto)
+# DEV  → Sin scheduler. Se ejecuta manualmente.
+# =============================================================================
+
 echo ""
-echo "⏰ PASO 3: CONFIGURAR SCHEDULER (Solo para PRO)"
-echo "================================================"
+echo "⏰ PASO 3: CONFIGURAR SCHEDULER"
+echo "================================"
 
 SCHEDULE_NAME="etl-st2json-schedule"
-SCHEDULE_CRON="0 */6 * * *"  # Cada 6 horas
 
-if [ "$ENVIRONMENT" = "pro" ]; then
-    # Solo en producción: crear/actualizar scheduler
-    if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
-        echo "📝 Scheduler existe, actualizando..."
-        gcloud scheduler jobs update http ${SCHEDULE_NAME} \
-            --location=${REGION} \
-            --project=${PROJECT_ID} \
-            --schedule="${SCHEDULE_CRON}" \
-            --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-            --http-method=POST \
-            --oauth-service-account-email=${SERVICE_ACCOUNT} \
-            --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
-    else
-        echo "🆕 Scheduler no existe, creando..."
-        gcloud scheduler jobs create http ${SCHEDULE_NAME} \
-            --location=${REGION} \
-            --project=${PROJECT_ID} \
-            --schedule="${SCHEDULE_CRON}" \
-            --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-            --http-method=POST \
-            --oauth-service-account-email=${SERVICE_ACCOUNT} \
-            --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
-    fi
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Scheduler configurado exitosamente (cada 6 horas)"
-    else
-        echo "⚠️  Advertencia: Error configurando scheduler (puede que Cloud Scheduler API no esté habilitada)"
-    fi
-else
-    # En dev/qua: desactivar o eliminar scheduler si existe
-    if gcloud scheduler jobs describe ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} &>/dev/null; then
-        echo "⚠️  Scheduler encontrado en ambiente ${ENVIRONMENT^^}. Desactivando..."
-        gcloud scheduler jobs pause ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} 2>/dev/null || \
-        gcloud scheduler jobs delete ${SCHEDULE_NAME} --location=${REGION} --project=${PROJECT_ID} --quiet 2>/dev/null
-        echo "✅ Scheduler desactivado/eliminado (no debe ejecutarse en ${ENVIRONMENT^^})"
-    else
-        echo "✅ No hay scheduler configurado (correcto para ambiente ${ENVIRONMENT^^})"
-    fi
-fi
+case "$ENVIRONMENT" in
+    pro)
+        echo "ℹ️  PRO: El Scheduler está gestionado por el Orquestador."
+        echo "   Este script no crea ni modifica el Scheduler en PRO."
+        ;;
+
+    qua)
+        # QUA: 1 corrida de prueba en la próxima hora en punto
+        CURRENT_HOUR=$(date -u +"%H")
+        NEXT_HOUR=$(( (CURRENT_HOUR + 1) % 24 ))
+        SCHEDULE_CRON="0 ${NEXT_HOUR} * * *"
+
+        echo "⏰ QUA: Configurando scheduler para 1 corrida de prueba..."
+        echo "   Cron: '${SCHEDULE_CRON}' (próxima hora en punto)"
+
+        JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
+
+        if gcloud scheduler jobs describe "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+            echo "📝 Scheduler existe — actualizando..."
+            gcloud scheduler jobs update http "${SCHEDULE_NAME}" \
+                --location="${REGION}" \
+                --project="${PROJECT_ID}" \
+                --schedule="${SCHEDULE_CRON}" \
+                --uri="${JOB_URI}" \
+                --http-method=POST \
+                --oauth-service-account-email="${SERVICE_ACCOUNT}" \
+                --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
+        else
+            echo "🆕 Scheduler no existe — creando..."
+            gcloud scheduler jobs create http "${SCHEDULE_NAME}" \
+                --location="${REGION}" \
+                --project="${PROJECT_ID}" \
+                --schedule="${SCHEDULE_CRON}" \
+                --uri="${JOB_URI}" \
+                --http-method=POST \
+                --oauth-service-account-email="${SERVICE_ACCOUNT}" \
+                --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform
+        fi
+
+        if [ $? -eq 0 ]; then
+            echo "✅ Scheduler QUA configurado (1 corrida: ${SCHEDULE_CRON})"
+        else
+            echo "⚠️  Error configurando scheduler. Verifica que Cloud Scheduler API esté habilitada."
+        fi
+        ;;
+
+    dev)
+        echo "ℹ️  DEV: Sin Scheduler. El job se ejecuta manualmente desde Cloud Shell."
+        if gcloud scheduler jobs describe "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+            echo "⚠️  Se encontró un scheduler en DEV — eliminando..."
+            gcloud scheduler jobs delete "${SCHEDULE_NAME}" \
+                --location="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null || true
+            echo "✅ Scheduler eliminado."
+        else
+            echo "✅ No hay scheduler en DEV (correcto)."
+        fi
+        ;;
+esac
+
+# =============================================================================
+# RESUMEN FINAL
+# =============================================================================
 
 echo ""
-echo "🎉 ¡DEPLOY COMPLETADO EXITOSAMENTE!"
-echo "===================================="
+echo "🎉 ¡DEPLOY COMPLETADO!"
+echo "======================"
 echo ""
-echo "🌍 AMBIENTE: ${ENVIRONMENT^^}"
-echo "📊 Para ejecutar el Job:"
+echo "🌍 AMBIENTE : ${ENVIRONMENT^^}"
+echo "📋 ETL_MODE : ${ETL_MODE^^}"
+echo "💾 Recursos : ${MEMORY} / ${CPU} CPU / ${TASK_TIMEOUT}s"
+echo ""
+echo "📊 Ejecutar el Job manualmente:"
 echo "   gcloud run jobs execute ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID}"
 echo ""
-echo "🔧 Para ver logs del último Job:"
+echo "🔧 Ver logs:"
 echo "   gcloud logging read \"resource.type=cloud_run_job AND resource.labels.job_name=${JOB_NAME}\" --limit=50 --format=\"table(timestamp,severity,textPayload)\" --project=${PROJECT_ID}"
 echo ""
-echo "📋 Para ver detalles del Job:"
-echo "   gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID}"
+echo "🧪 Modo TEST desde Cloud Shell (sin desplegar):"
+echo "   python main.py --mode test --company-id 1 --endpoint gross-pay-items --dry-run"
 echo ""
-echo "🔄 Para deploy en otros ambientes:"
-echo "   ./build_deploy.sh dev    # Deploy en DEV (desarrollo)"
-echo "   ./build_deploy.sh qua    # Deploy en QUA (validación)"
-echo "   ./build_deploy.sh pro    # Deploy en PRO (producción)"
+echo "🔄 Deploy en otros ambientes:"
+echo "   ./build_deploy.sh dev"
+echo "   ./build_deploy.sh qua"
+echo "   ./build_deploy.sh pro"
 echo ""
-echo "📝 Notas:"
-echo "   - DEV: Para desarrollo y testing"
-echo "   - QUA: Para validación y QA"
-echo "   - PRO: Para producción con datos reales"
-echo ""
-
