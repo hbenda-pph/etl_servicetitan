@@ -91,7 +91,7 @@ def orchestrate_etl_jobs(request):
         operation1 = client.run_job(request=request1)
         
         print("⏳ Polling Job 1...")
-        operation1.result()  # Espera activa
+        operation1.result(timeout=3600)  # Espera activa con timeout ampliado
         
         duration_j1 = (datetime.now() - start_time_j1).total_seconds()
         print(f"✅ Job 1 completado en {duration_j1/60:.1f} minutos")
@@ -112,7 +112,7 @@ def orchestrate_etl_jobs(request):
         operation2 = client.run_job(request=request2)
         
         print("⏳ Polling Job 2...")
-        operation2.result()
+        operation2.result(timeout=3600)
         
         duration_j2 = (datetime.now() - start_time_j2).total_seconds()
         print(f"✅ Job 2 completado en {duration_j2/60:.1f} minutos")
