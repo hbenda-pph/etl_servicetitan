@@ -84,8 +84,11 @@ def orchestrate_etl_jobs(request):
         print(f"🚀 [1/2] Iniciando Job 1: Extracción ({job1_name})")
         
         job1_parent = f"projects/{project_id}/locations/{region}/jobs/{job1_name}"
-        overrides1 = {"task_count": st2json_tasks}
-        operation1 = client.run_job(name=job1_parent, overrides=overrides1)
+        request1 = {
+            "name": job1_parent,
+            "overrides": {"task_count": st2json_tasks}
+        }
+        operation1 = client.run_job(request=request1)
         
         print("⏳ Polling Job 1...")
         operation1.result()  # Espera activa
@@ -102,8 +105,11 @@ def orchestrate_etl_jobs(request):
         print(f"🚀 [2/2] Iniciando Job 2: Carga a BigQuery ({job2_name})")
         
         job2_parent = f"projects/{project_id}/locations/{region}/jobs/{job2_name}"
-        overrides2 = {"task_count": json2bq_tasks}
-        operation2 = client.run_job(name=job2_parent, overrides=overrides2)
+        request2 = {
+            "name": job2_parent,
+            "overrides": {"task_count": json2bq_tasks}
+        }
+        operation2 = client.run_job(request=request2)
         
         print("⏳ Polling Job 2...")
         operation2.result()
