@@ -152,7 +152,7 @@ echo "⏰ PASO 2: CONFIGURAR SCHEDULER (Solo para PRO)"
 echo "================================================"
 
 SCHEDULE_NAME="orchestrate-etl-jobs-schedule"
-SCHEDULE_CRON="0 */6 * * *"  # Cada 6 horas
+SCHEDULE_CRON="0 5,11,17,23 * * *"  # A las 5am, 11am, 5pm, 11pm
 
 if [ "$ENVIRONMENT" = "pro" ]; then
     # Obtener URL pública de la función (igual que en DEV)
@@ -171,6 +171,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
             --location=${REGION} \
             --project=${PROJECT_ID} \
             --schedule="${SCHEDULE_CRON}" \
+            --time-zone="America/Mexico_City" \
             --uri="${FUNCTION_URL}" \
             --http-method=POST \
             --attempt-deadline=1800s \
@@ -181,6 +182,7 @@ if [ "$ENVIRONMENT" = "pro" ]; then
             --location=${REGION} \
             --project=${PROJECT_ID} \
             --schedule="${SCHEDULE_CRON}" \
+            --time-zone="America/Mexico_City" \
             --uri="${FUNCTION_URL}" \
             --http-method=POST \
             --attempt-deadline=1800s \
