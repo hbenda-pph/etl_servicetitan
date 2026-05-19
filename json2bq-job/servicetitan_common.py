@@ -445,7 +445,7 @@ def fix_nested_value(value, field_path="", known_array_fields=None):
         field_name_lower = field_path.lower() if field_path else ""
         
         # 1. Regla hardcodeada (serialNumbers)
-        if 'serial' in field_name_lower and 'number' in field_name_lower:
+        if 'serial' in field_name_lower and 'number' in field_name_lower and not field_name_lower.endswith('[]'):
             return []
 
         # PRINCIPIO BRONZE: Preservar nombres originales (camelCase) - NO convertir a snake_case
