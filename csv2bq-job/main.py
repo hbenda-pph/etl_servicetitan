@@ -22,7 +22,9 @@ from servicetitan_common import (
     log_event_bq,
     get_balanced_tasks,
     read_schema_from_layout,
-    load_csv_to_bq
+    load_csv_to_bq,
+    align_schemas_before_merge,
+    execute_merge_or_insert
 )
 
 # Proyecto central (ALL / TEST): se lee dinámicamente
@@ -32,8 +34,13 @@ PROJECT_ALL = get_bigquery_project_id()
 DATASET_COMPANIES = "settings"
 TABLE_COMPANIES = "companies"
 
-# Dataset destino
+# Datasets
+DATASET_STAGING = "staging_csv"
 DATASET_FINAL = "reports"
+
+PRIMARY_KEYS = {
+    "technician_timesheet_summary": ["employee_id", "date"]
+}
 
 def _make_log_callback(source: str):
     def callback(*args, **kwargs):
@@ -151,28 +158,27 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
 
         bq_client = bigquery.Client(project=project_id)
         
-        # Asegurar que existe el dataset reports
-        try:
-            bq_client.get_dataset(f"{project_id}.{DATASET_FINAL}")
-        except NotFound:
-            ds = bigquery.Dataset(f"{project_id}.{DATASET_FINAL}")
-            ds.location = "US"
-            bq_client.create_dataset(ds)
-            print(f"🆕 Dataset {DATASET_FINAL} creado en {project_id}")
+        # Asegurar que existen datasets
+        for ds_name in [DATASET_STAGING, DATASET_FINAL]:
+            try:
+                bq_client.get_dataset(f"{project_id}.{ds_name}")
+            except NotFound:
+                ds = bigquery.Dataset(f"{project_id}.{ds_name}")
+                ds.location = "US"
+                bq_client.create_dataset(ds)
+                print(f"🆕 Dataset {ds_name} creado en {project_id}")
 
-        table_ref_final = bq_client.dataset(DATASET_FINAL).table(table_name)
+        table_ref_staging = bq_client.dataset(DATASET_STAGING).table(table_name)
         
-        # Para evitar duplicados en pruebas repetidas, si es DEV y el file es el mismo.
-        # Por ahora asumimos WRITE_APPEND, dado que bajan toda la info del año y luego diario.
-        # O WRITE_TRUNCATE? Dejamos WRITE_APPEND (is_append=True).
+        # Cargar a staging (TRUNCATE)
         load_start = time.time()
         success, load_time, error_msg = load_csv_to_bq(
             bq_client=bq_client,
             temp_csv_path=temp_csv,
-            table_ref_final=table_ref_final,
+            table_ref_final=table_ref_staging,
             schema=schema,
             load_start=load_start,
-            is_append=True 
+            is_append=False 
         )
 
         if not success:
@@ -181,17 +187,65 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
                 log_callback(
                     company_id=company_id, company_name=company_name,
                     project_id=project_id, endpoint=table_name,
-                    event_type="ERROR", event_title="Error cargando CSV",
+                    event_type="ERROR", event_title="Error cargando CSV a staging",
                     event_message=f"Error cargando {csv_filename}: {error_msg}"
                 )
+            continue
+            
+        # Generar columna 'id' en staging
+        pks = PRIMARY_KEYS.get(table_name)
+        if pks:
+            pk_concat = ", '|', ".join([f"IFNULL(CAST({pk} AS STRING), '')" for pk in pks])
+            update_sql = f"""
+            ALTER TABLE `{project_id}.{DATASET_STAGING}.{table_name}` ADD COLUMN IF NOT EXISTS id STRING;
+            UPDATE `{project_id}.{DATASET_STAGING}.{table_name}`
+            SET id = TO_HEX(MD5(CONCAT({pk_concat})))
+            WHERE 1=1;
+            """
+            print(f"🔑 Generando columna 'id' en staging usando claves: {pks}")
+            try:
+                bq_client.query(update_sql).result()
+            except Exception as e:
+                print(f"❌ Error generando 'id': {e}")
+                continue
         else:
-            print(f"✅ Endpoint {table_name} completado en {time.time()-ep_start:.1f}s")
+            print(f"⚠️ No hay llaves primarias configuradas para {table_name}, el MERGE podría fallar si la tabla requiere id.")
+
+        # Obtener las tablas para merge
+        try:
+            staging_table_obj = bq_client.get_table(table_ref_staging)
+            try:
+                final_table_obj = bq_client.get_table(f"{project_id}.{DATASET_FINAL}.{table_name}")
+                # Alinear esquemas
+                mismatches = align_schemas_before_merge(bq_client, staging_table_obj, final_table_obj, project_id, DATASET_FINAL, table_name)
+            except NotFound:
+                # La tabla final no existe aún
+                final_table_obj = staging_table_obj # Dummy para que el merge la cree o use su esquema
+                mismatches = {}
+        except Exception as e:
+            print(f"❌ Error obteniendo tablas: {e}")
+            continue
+            
+        # Ejecutar MERGE
+        merge_start = time.time()
+        success_m, merge_time, err_m = execute_merge_or_insert(
+            bq_client, staging_table_obj, final_table_obj, project_id, DATASET_FINAL, table_name,
+            DATASET_STAGING, table_name, merge_start, log_callback,
+            company_id, company_name, table_name, mismatches,
+            use_merge=True, is_production=True
+        )
+
+        if success_m:
+            print(f"✅ Endpoint {table_name} MERGE completado en {time.time()-ep_start:.1f}s")
+        else:
+            print(f"❌ Endpoint {table_name} MERGE falló.")
 
         try:
             os.remove(temp_csv)
         except Exception:
             pass
 
+    
     company_elapsed = time.time() - company_start
     print(f"\n{'='*80}")
     print(
