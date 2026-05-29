@@ -98,20 +98,20 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
         
         # Asumimos que el nombre del CSV coincide con el nombre de la tabla
         # Se pueden probar varios formatos
-        csv_filename_1 = f"{table_name}.csv"
-        csv_filename_2 = f"servicetitan_{table_name}.csv"
+        csv_filename_1 = f"servicetitan_{table_name}.csv"
+        csv_filename_2 = f"{table_name}.csv"
         csv_filename_3 = f"{table_name.replace('_', ' ').title()}.csv"
         
-        blob = bucket.blob(csv_filename_3) # Dar prioridad al formato title-case con espacios
-        csv_filename = csv_filename_3
+        blob = bucket.blob(csv_filename_1) # Dar prioridad al formato estandar
+        csv_filename = csv_filename_1
         
         if not blob.exists():
-            blob = bucket.blob(csv_filename_1)
-            csv_filename = csv_filename_1
+            blob = bucket.blob(csv_filename_2)
+            csv_filename = csv_filename_2
             
             if not blob.exists():
-                blob = bucket.blob(csv_filename_2)
-                csv_filename = csv_filename_2
+                blob = bucket.blob(csv_filename_3)
+                csv_filename = csv_filename_3
                 
                 if not blob.exists():
                     print(f"⚠️  Archivos {csv_filename_3}, {csv_filename_1} o {csv_filename_2} no encontrados en {bucket_name}")
