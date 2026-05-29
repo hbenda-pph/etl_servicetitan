@@ -97,27 +97,32 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
         ep_start       = time.time()
         
         # Asumimos que el nombre del CSV coincide con el nombre de la tabla
-        # Se pueden probar ambos formatos
+        # Se pueden probar varios formatos
         csv_filename_1 = f"{table_name}.csv"
         csv_filename_2 = f"servicetitan_{table_name}.csv"
+        csv_filename_3 = f"{table_name.replace('_', ' ').title()}.csv"
         
-        blob = bucket.blob(csv_filename_1)
-        csv_filename = csv_filename_1
+        blob = bucket.blob(csv_filename_3) # Dar prioridad al formato title-case con espacios
+        csv_filename = csv_filename_3
         
         if not blob.exists():
-            blob = bucket.blob(csv_filename_2)
-            if blob.exists():
+            blob = bucket.blob(csv_filename_1)
+            csv_filename = csv_filename_1
+            
+            if not blob.exists():
+                blob = bucket.blob(csv_filename_2)
                 csv_filename = csv_filename_2
-            else:
-                print(f"⚠️  Archivos {csv_filename_1} o {csv_filename_2} no encontrados en {bucket_name}")
-                if log_callback:
-                    log_callback(
-                        company_id=company_id, company_name=company_name,
-                        project_id=project_id, endpoint=table_name,
-                        event_type="WARNING", event_title="Archivo no encontrado",
-                        event_message=f"Ni {csv_filename_1} ni {csv_filename_2} encontrados en {bucket_name}."
-                    )
-                continue
+                
+                if not blob.exists():
+                    print(f"⚠️  Archivos {csv_filename_3}, {csv_filename_1} o {csv_filename_2} no encontrados en {bucket_name}")
+                    if log_callback:
+                        log_callback(
+                            company_id=company_id, company_name=company_name,
+                            project_id=project_id, endpoint=table_name,
+                            event_type="WARNING", event_title="Archivo no encontrado",
+                            event_message=f"Ninguna variante del archivo encontrada en {bucket_name}."
+                        )
+                    continue
 
         temp_csv = f"/tmp/{project_id}_{table_name}.csv"
         layout_file = f"layout_{table_name}.txt"
