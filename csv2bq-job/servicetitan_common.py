@@ -1745,7 +1745,7 @@ def execute_merge_or_insert(
             cols_list = sorted(list(staging_cols))
             print(f"⚠️ [execute_merge_or_insert] Tabla staging no tiene columna 'id', se omitirá en el INSERT.")
         
-        insert_cols_with_etl = cols_list + ['_etl_synced', '_etl_operation']
+        insert_cols_with_etl = [f"`{c}`" for c in cols_list] + ['`_etl_synced`', '`_etl_operation`']
         
         # Usar SAFE_CAST si hay mismatches definidos (rara vez pero posible en primer load si final fue precreado)
         type_mismatches = type_mismatches or {}
@@ -1754,8 +1754,8 @@ def execute_merge_or_insert(
                 final_type = type_mismatches[col]['final']
                 BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
                 final_type_sql = BQ_ALIASES.get(final_type, final_type)
-                return f'SAFE_CAST(S.{col} AS {final_type_sql})'
-            return f'S.{col}'
+                return f'SAFE_CAST(S.`{col}` AS {final_type_sql})'
+            return f'S.`{col}`'
             
         insert_values_with_etl = [_col_insert_expr(col) for col in cols_list] + ['CURRENT_TIMESTAMP()', "'INSERT'"]
         
@@ -1841,12 +1841,12 @@ def execute_merge_or_insert(
                         final_type = type_mismatches[col]['final']
                         BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
                         final_type_sql = BQ_ALIASES.get(final_type, final_type)
-                        return f'SAFE_CAST(S.{col} AS {final_type_sql})'
-                    return f'S.{col}'
+                        return f'SAFE_CAST(S.`{col}` AS {final_type_sql})'
+                    return f'S.`{col}`'
                     
                 insert_trunc_sql = f'''
                     INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
-                        {', '.join(trunc_cols)}, _etl_synced, _etl_operation
+                        {', '.join([f"`{c}`" for c in trunc_cols])}, `_etl_synced`, `_etl_operation`
                     )
                     SELECT {', '.join([_col_trunc_insert_expr(c) for c in trunc_cols])},
                            CURRENT_TIMESTAMP(), 'INSERT'
@@ -1872,12 +1872,12 @@ def execute_merge_or_insert(
                 final_type = type_mismatches[col]['final']
                 BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
                 final_type_sql = BQ_ALIASES.get(final_type, final_type)
-                return f'SAFE_CAST(S.{col} AS {final_type_sql})'
-            return f'S.{col}'
+                return f'SAFE_CAST(S.`{col}` AS {final_type_sql})'
+            return f'S.`{col}`'
             
         # UPDATE solo lleva {col} = {expr} (BQ no permite alias 'T.' en la izquierda)
         def _col_update_expr(col):
-            return f'{col} = {_col_val_expr(col)}'
+            return f'`{col}` = {_col_val_expr(col)}'
             
         update_set = ', '.join([_col_update_expr(col) for col in safe_cols])
         
@@ -1889,7 +1889,7 @@ def execute_merge_or_insert(
             
         insert_cols = cols_list
         # VALUES list usa puramente _col_val_expr
-        insert_values = [_col_val_expr(col) if col != 'id' else 'S.id' for col in cols_list]
+        insert_values = [_col_val_expr(col) if col != 'id' else 'S.`id`' for col in cols_list]
         
         # MERGE incremental a tabla final con Soft Delete y campos ETL
         merge_sql = f'''
@@ -1901,8 +1901,8 @@ def execute_merge_or_insert(
                 _etl_synced = CURRENT_TIMESTAMP(),
                 _etl_operation = 'UPDATE'
             WHEN NOT MATCHED THEN INSERT (
-                {', '.join(insert_cols)},
-                _etl_synced, _etl_operation
+                {', '.join([f"`{c}`" for c in insert_cols])},
+                `_etl_synced`, `_etl_operation`
             ) VALUES (
                 {', '.join(insert_values)},
                 CURRENT_TIMESTAMP(), 'INSERT'
