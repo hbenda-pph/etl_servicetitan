@@ -1609,7 +1609,7 @@ def execute_merge_or_insert(
     bq_client, staging_table, final_table, project_id, dataset_final, table_final,
     dataset_staging, table_staging, merge_start, log_event_callback=None,
     company_id=None, company_name=None, endpoint_name=None, type_mismatches=None,
-    use_merge=True, temp_fixed=None, is_production=True
+    use_merge=True, temp_fixed=None, is_production=True, use_soft_delete=True
 ):
     """
     Ejecuta MERGE, INSERT directo, o CREATE OR REPLACE TABLE dependiendo de la configuración.
@@ -1902,15 +1902,21 @@ def execute_merge_or_insert(
         # VALUES list usa puramente _col_val_expr
         insert_values = [_col_val_expr(col) if col != 'id' else 'S.`id`' for col in cols_list]
         
-        # MERGE incremental a tabla final con Soft Delete y campos ETL
+        # MERGE incremental a tabla final con Soft Delete opcional y campos ETL
+        soft_delete_clause = """
+            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
+                `_etl_synced` = CURRENT_TIMESTAMP(),
+                `_etl_operation` = 'DELETE'
+        """ if use_soft_delete else ""
+
         merge_sql = f'''
             MERGE `{project_id}.{dataset_final}.{table_final}` T
             USING `{project_id}.{dataset_staging}.{table_staging}` S
             ON T.id = S.id
             WHEN MATCHED THEN UPDATE SET 
                 {update_set},
-                _etl_synced = CURRENT_TIMESTAMP(),
-                _etl_operation = 'UPDATE'
+                `_etl_synced` = CURRENT_TIMESTAMP(),
+                `_etl_operation` = 'UPDATE'
             WHEN NOT MATCHED THEN INSERT (
                 {', '.join([f"`{c}`" for c in insert_cols])},
                 `_etl_synced`, `_etl_operation`
@@ -1918,9 +1924,7 @@ def execute_merge_or_insert(
                 {', '.join(insert_values)},
                 CURRENT_TIMESTAMP(), 'INSERT'
             )
-            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET
-                _etl_synced = CURRENT_TIMESTAMP(),
-                _etl_operation = 'DELETE'
+            {soft_delete_clause}
         '''
         
         try:
