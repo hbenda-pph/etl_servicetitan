@@ -1730,6 +1730,17 @@ def execute_merge_or_insert(
         except Exception as schema_error:
             print(f"⚠️ [execute_merge_or_insert] Error al actualizar esquema: {str(schema_error)}")
     
+    # Asegurar que la tabla final tenga los campos ETL (si no es el dummy)
+    if getattr(final_table, "table_id", None) == table_final and getattr(final_table, "dataset_id", None) == dataset_final:
+        final_col_names = {col.name for col in final_schema}
+        if '_etl_synced' not in final_col_names:
+            try:
+                print(f"🆕 Agregando campos ETL a {dataset_final}.{table_final}...")
+                bq_client.query(f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS `_etl_synced` TIMESTAMP").result()
+                bq_client.query(f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS `_etl_operation` STRING").result()
+            except Exception as e:
+                print(f"⚠️ Error agregando campos ETL: {e}")
+
     # Verificar si la tabla final está vacía (primera carga)
     is_first_load = final_table.num_rows == 0
     
