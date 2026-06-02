@@ -211,17 +211,26 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
         else:
             print(f"⚠️ No hay llaves primarias configuradas para {table_name}, el MERGE podría fallar si la tabla requiere id.")
 
+        # Asegurar tabla final y hacer MERGE
+        final_table_ref = bq_client.dataset(DATASET_FINAL).table(table_name)
+        try:
+            bq_client.get_table(final_table_ref)
+        except NotFound:
+            staging_schema = bq_client.get_table(table_ref_staging).schema
+            campos_etl = [
+                bigquery.SchemaField("_etl_synced",    "TIMESTAMP", mode="REQUIRED"),
+                bigquery.SchemaField("_etl_operation", "STRING",    mode="REQUIRED"),
+            ]
+            new_table = bigquery.Table(final_table_ref, schema=list(staging_schema) + campos_etl)
+            bq_client.create_table(new_table)
+            print(f"🆕 Tabla final {DATASET_FINAL}.{table_name} creada automáticamente con campos ETL.")
+
         # Obtener las tablas para merge
         try:
             staging_table_obj = bq_client.get_table(table_ref_staging)
-            try:
-                final_table_obj = bq_client.get_table(f"{project_id}.{DATASET_FINAL}.{table_name}")
-                # Alinear esquemas
-                mismatches = align_schemas_before_merge(bq_client, staging_table_obj, final_table_obj, project_id, DATASET_FINAL, table_name)
-            except NotFound:
-                # La tabla final no existe aún
-                final_table_obj = staging_table_obj # Dummy para que el merge la cree o use su esquema
-                mismatches = {}
+            final_table_obj = bq_client.get_table(final_table_ref)
+            # Alinear esquemas
+            mismatches = align_schemas_before_merge(bq_client, staging_table_obj, final_table_obj, project_id, DATASET_FINAL, table_name)
         except Exception as e:
             print(f"❌ Error obteniendo tablas: {e}")
             continue
