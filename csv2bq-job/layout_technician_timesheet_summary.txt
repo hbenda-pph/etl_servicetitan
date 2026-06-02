@@ -1,5 +1,5 @@
 employee_id:INTEGER,
-employee_:STRING,
+employee:STRING,
 date:STRING,
 start:STRING,
 first_arrival_time:STRING,
