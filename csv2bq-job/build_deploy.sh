@@ -123,4 +123,51 @@ else
         ${PARALLEL_FLAGS}
 fi
 
-echo "🎉 ¡DEPLOY COMPLETADO!"
+echo "⏰ PASO 3: CONFIGURAR SCHEDULER"
+
+if [ "$ENVIRONMENT" == "pro" ]; then
+    echo "⚙️ Configurando Scheduler recurrente para PRO..."
+    # Programar para 12am, 6am, 12pm, 6pm todos los días
+    SCHEDULE_NAME="trigger-${JOB_NAME}"
+    SCHEDULE_CRON="0 0,6,12,18 * * *"
+    JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
+
+    if gcloud scheduler jobs describe "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+        echo "📝 Scheduler existe — actualizando..."
+        gcloud scheduler jobs update http "${SCHEDULE_NAME}" \
+            --location="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --schedule="${SCHEDULE_CRON}" \
+            --time-zone="America/Mexico_City" \
+            --uri="${JOB_URI}" \
+            --http-method=POST \
+            --attempt-deadline=1800s \
+            --oidc-service-account-email="${SERVICE_ACCOUNT}"
+    else
+        echo "🆕 Scheduler no existe — creando..."
+        gcloud scheduler jobs create http "${SCHEDULE_NAME}" \
+            --location="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --schedule="${SCHEDULE_CRON}" \
+            --time-zone="America/Mexico_City" \
+            --uri="${JOB_URI}" \
+            --http-method=POST \
+            --attempt-deadline=1800s \
+            --oidc-service-account-email="${SERVICE_ACCOUNT}"
+    fi
+    echo "🎉 ¡DEPLOY Y SCHEDULER COMPLETADOS PARA PRO!"
+else
+    echo "ℹ️  Ambiente ${ENVIRONMENT^^}: Sin CRON recurrente."
+    echo "   Para este Job CSV, el CRON ('0 0,6,12,18 * * *') es exclusivo de PRO."
+    echo "   En DEV y QUA el Job se ejecuta manualmente para pruebas."
+    
+    # Asegurar que no quede un scheduler huérfano en ambientes de prueba
+    SCHEDULE_NAME="trigger-${JOB_NAME}"
+    if gcloud scheduler jobs describe "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+        echo "⚠️ Se encontró un scheduler en ${ENVIRONMENT^^}. Desactivando/eliminando..."
+        gcloud scheduler jobs pause "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" 2>/dev/null || \
+        gcloud scheduler jobs delete "${SCHEDULE_NAME}" --location="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null
+        echo "✅ Scheduler desactivado/eliminado."
+    fi
+    echo "🎉 ¡DEPLOY COMPLETADO PARA ${ENVIRONMENT^^}!"
+fi
