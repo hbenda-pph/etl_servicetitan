@@ -7,7 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY servicetitan_common.py .
 COPY main.py .
-# Asegurarse de copiar los archivos de layout que definen los esquemas de las tablas
-COPY layout_*.txt ./
+# Ya no se usan archivos layout_*.txt para los esquemas
 
 CMD ["python", "main.py"]
