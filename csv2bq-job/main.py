@@ -341,7 +341,7 @@ def run_test(args, log_callback):
 
 def main():
     parser = argparse.ArgumentParser(description="ETL: CSV (GCS) → BigQuery")
-    parser.add_argument("--mode", type=str, choices=["all", "test"], default="test")
+    parser.add_argument("--mode", type=str, choices=["all", "test"], default=None)
     parser.add_argument("--company-id", "-c", type=int, default=None)
     parser.add_argument("--endpoint", "-e", type=str, nargs="+", default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
