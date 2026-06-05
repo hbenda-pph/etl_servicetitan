@@ -187,16 +187,16 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
         # Generar columna 'id' en staging
         pks = PRIMARY_KEYS.get(table_name)
         if pks:
-            pk_concat = ", '|', ".join([f"IFNULL(CAST({pk} AS STRING), '')" for pk in pks])
-            update_sql = f"""
-            ALTER TABLE `{project_id}.{DATASET_STAGING}.{table_name}` ADD COLUMN IF NOT EXISTS id STRING;
-            UPDATE `{project_id}.{DATASET_STAGING}.{table_name}`
-            SET id = TO_HEX(MD5(CONCAT({pk_concat})))
-            WHERE 1=1;
-            """
             print(f"🔑 Generando columna 'id' en staging usando claves: {pks}")
             try:
-                bq_client.query(update_sql).result()
+                # Usar CREATE OR REPLACE TABLE para evitar bugs de compilación/caché con ALTER TABLE
+                pk_concat = ", '|', ".join([f"IFNULL(CAST({pk} AS STRING), '')" for pk in pks])
+                alter_sql = f"""
+                CREATE OR REPLACE TABLE `{project_id}.{DATASET_STAGING}.{table_name}` AS
+                SELECT *, TO_HEX(MD5(CONCAT({pk_concat}))) as id
+                FROM `{project_id}.{DATASET_STAGING}.{table_name}`;
+                """
+                bq_client.query(alter_sql).result()
             except Exception as e:
                 print(f"❌ Error generando 'id': {e}")
                 continue
