@@ -21,7 +21,7 @@ from servicetitan_common import (
     get_bigquery_project_id,
     log_event_bq,
     get_balanced_tasks,
-    read_schema_from_layout,
+    generate_dynamic_schema_from_csv,
     load_csv_to_bq,
     align_schemas_before_merge,
     execute_merge_or_insert
@@ -51,17 +51,10 @@ def _make_log_callback(source: str):
 
 def get_available_endpoints():
     """
-    Busca los archivos layout_*.txt en el directorio actual
-    para determinar qué tablas (endpoints) se deben procesar.
-    Retorna una lista de nombres de tabla.
+    Retorna la lista de endpoints soportados.
+    Por ahora se basa en las llaves primarias configuradas.
     """
-    layouts = glob.glob("layout_*.txt")
-    endpoints = []
-    for layout in layouts:
-        # layout_technician_timesheet_summary.txt -> technician_timesheet_summary
-        name = layout.replace("layout_", "").replace(".txt", "")
-        endpoints.append(name)
-    return endpoints
+    return list(PRIMARY_KEYS.keys())
 
 
 def process_company(row, endpoints_override=None, dry_run=False, log_callback=None):
@@ -132,13 +125,12 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
                     continue
 
         temp_csv = f"/tmp/{project_id}_{table_name}.csv"
-        layout_file = f"layout_{table_name}.txt"
 
         print(f"\n📦 ENDPOINT: {table_name} | company {company_id}")
 
         if dry_run:
             print(f"   📋 [DRY-RUN] Descargaría: gs://{bucket_name}/{csv_filename}")
-            print(f"   📋 [DRY-RUN] Cargaría esquema de {layout_file}")
+            print(f"   📋 [DRY-RUN] Generaría esquema dinámicamente desde el CSV")
             print(f"   📋 [DRY-RUN] APPEND a: {project_id}.{DATASET_FINAL}.{table_name}")
             continue
 
@@ -149,8 +141,8 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
             file_size_mb = os.path.getsize(temp_csv) / (1024 * 1024)
             print(f"⬇️  Descargado {csv_filename} ({file_size_mb:.2f} MB) en {dl_time:.1f}s")
             
-            print("🔍 Cargando esquema del archivo layout...")
-            schema = read_schema_from_layout(layout_file)
+            print("🔍 Generando esquema dinámico desde los encabezados del CSV...")
+            schema = generate_dynamic_schema_from_csv(temp_csv)
             
         except Exception as e:
             print(f"❌ Error preparando archivo {csv_filename}: {e}")

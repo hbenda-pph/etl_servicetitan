@@ -1953,34 +1953,42 @@ def execute_merge_or_insert(
             return (False, merge_time, error_msg)
 
 
-def read_schema_from_layout(layout_path):
+def generate_dynamic_schema_from_csv(csv_path):
     """
-    Lee un archivo de layout (ej. layout_technician_timesheet_summary.txt)
-    y lo convierte en una lista de bigquery.SchemaField.
-    Formato esperado por línea: campo:TIPO
+    Lee la primera línea de un archivo CSV para extraer los encabezados
+    y genera dinámicamente un esquema de BigQuery.
+    Asigna INTEGER a employee_id, DATE a date, y STRING a todo lo demás.
     """
     from google.cloud import bigquery
-    schema = []
-    if not os.path.exists(layout_path):
-        raise FileNotFoundError(f"Archivo de layout no encontrado: {layout_path}")
+    import csv
+    import os
+    
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Archivo CSV no encontrado: {csv_path}")
         
-    with open(layout_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            # Puede tener una coma al final
-            if line.endswith(","):
-                line = line[:-1]
-                
-            parts = line.split(":")
-            if len(parts) == 2:
-                name = parts[0].strip()
-                bq_type = parts[1].strip()
-                schema.append(bigquery.SchemaField(name, bq_type))
-            else:
-                print(f"⚠️ Línea de layout ignorada (formato inválido): {line}")
-                
+    schema = []
+    
+    # Abrir el archivo y leer la primera fila
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        try:
+            headers = next(reader)
+        except StopIteration:
+            raise ValueError(f"El archivo CSV está vacío: {csv_path}")
+            
+    # Limpiar y normalizar encabezados (quitar espacios, caracteres especiales, BOM)
+    clean_headers = [h.strip().strip('\ufeff').replace(' ', '_').lower() for h in headers]
+    
+    for h in clean_headers:
+        if h == "employee_id":
+            bq_type = "INTEGER"
+        elif h == "date":
+            bq_type = "DATE"
+        else:
+            bq_type = "STRING"
+            
+        schema.append(bigquery.SchemaField(h, bq_type))
+        
     return schema
 
 def load_csv_to_bq(
