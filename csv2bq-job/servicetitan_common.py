@@ -1819,25 +1819,33 @@ def execute_merge_or_insert(
         
         # Verificar que 'id' existe en la tabla final Y EN STAGING (prerequisito del MERGE)
         final_has_id = any(col.name == 'id' for col in final_table_refresh.schema)
-        staging_has_id = any(col.name == 'id' for col in staging_schema)
+        
+        # Bypassear el chequeo de caché para STAGING si sabemos que la tabla requiere ID (fue generado en main.py)
+        if require_id:
+            staging_has_id = True
+        else:
+            staging_has_id = any(col.name == 'id' for col in staging_schema)
         
         if not final_has_id and staging_has_id:
             # Intentar agregarlo vía ALTER TABLE a la tabla final si staging sí lo tiene
-            staging_id_field = next((col for col in staging_schema if col.name == 'id'), None)
+            staging_id_field = next((col for col in staging_schema if col.name == 'id'), bigquery.SchemaField('id', 'STRING'))
             if staging_id_field:
                 try:
                     id_sql_type = _schema_field_to_sql(staging_id_field)
                     alter_id_sql = f"ALTER TABLE `{project_id}.{dataset_final}.{table_final}` ADD COLUMN IF NOT EXISTS {id_sql_type}"
                     bq_client.query(alter_id_sql).result()
-                    print(f"  ✨ Campo 'id' agregado a {dataset_final}.{table_final} para habilitar MERGE")
                     final_has_id = True
+                    print(f"  ✨ Campo 'id' agregado automáticamente a {dataset_final}.{table_final} (ALTER TABLE)")
                 except Exception as alter_id_err:
                     print(f"⚠️ [execute_merge_or_insert] No se pudo agregar 'id' a {dataset_final}.{table_final}: {clean_bq_error(alter_id_err)}")
             
         if not final_has_id or not staging_has_id:
+            if require_id:
+                raise ValueError(f"La tabla {table_final} requiere un 'id' para MERGE (tiene PRIMARY_KEYS), pero BigQuery no reportó la columna 'id' en el esquema de {'staging' if not staging_has_id else 'final'}. Esto puede deberse al delay en el caché de la API tras el ALTER TABLE. Se aborta la ejecución para evitar la TRUNCACIÓN INVOLUNTARIA y pérdida de datos.")
+            
             # Sin 'id' en uno de los dos lados: hacer TRUNCATE + INSERT (reemplazo total). Apropiado para tablas de settings.
             reason = "no tiene 'id' en staging" if not staging_has_id else "no tiene 'id' en la tabla final"
-            print(f"\u26a0\ufe0f [execute_merge_or_insert] Tabla {dataset_final}.{table_final} {reason}. Usando TRUNCATE + INSERT (reemplazo total).")
+            print(f"⚠️ [execute_merge_or_insert] Tabla {dataset_final}.{table_final} {reason}. Usando TRUNCATE + INSERT (reemplazo total).")
             try:
                 truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
                 bq_client.query(truncate_sql).result()

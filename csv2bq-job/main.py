@@ -233,7 +233,8 @@ def process_company(row, endpoints_override=None, dry_run=False, log_callback=No
             bq_client, staging_table_obj, final_table_obj, project_id, DATASET_FINAL, table_name,
             DATASET_STAGING, table_name, merge_start, log_callback,
             company_id, company_name, table_name, mismatches,
-            use_merge=True, is_production=True, use_soft_delete=False
+            use_merge=True, is_production=True, use_soft_delete=False,
+            require_id=bool(pks)
         )
 
         if success_m:
