@@ -1729,6 +1729,19 @@ def execute_merge_or_insert(
                 print(f"⚠️ [execute_merge_or_insert] Columnas que no se pudieron agregar (se ignorarán en MERGE): {sorted(failed_cols)}")
         except Exception as schema_error:
             print(f"⚠️ [execute_merge_or_insert] Error al actualizar esquema: {str(schema_error)}")
+            
+    # Detectar diferencias de tipos (ej. DATE en staging vs STRING en final)
+    type_mismatches = {}
+    for final_col in final_schema:
+        staging_col = next((c for c in staging_schema if c.name == final_col.name), None)
+        if staging_col and staging_col.field_type != final_col.field_type:
+            type_mismatches[final_col.name] = {
+                'staging': staging_col.field_type,
+                'final': final_col.field_type
+            }
+            print(f"🔄 Mismatch de tipo detectado en '{final_col.name}': staging={staging_col.field_type}, final={final_col.field_type}. Se usará SAFE_CAST.")
+            
+    return type_mismatches
     
     # Asegurar que la tabla final tenga los campos ETL (si no es el dummy)
     if getattr(final_table, "table_id", None) == table_final and getattr(final_table, "dataset_id", None) == dataset_final:
