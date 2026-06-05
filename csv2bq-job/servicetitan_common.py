@@ -1976,8 +1976,18 @@ def generate_dynamic_schema_from_csv(csv_path):
         except StopIteration:
             raise ValueError(f"El archivo CSV está vacío: {csv_path}")
             
-    # Limpiar y normalizar encabezados (quitar espacios, caracteres especiales, BOM)
-    clean_headers = [h.strip().strip('\ufeff').replace(' ', '_').lower() for h in headers]
+    import re
+    # Limpiar y normalizar encabezados (letras, números y guiones bajos solamente)
+    clean_headers = []
+    for h in headers:
+        # Quitar BOM y espacios de los extremos
+        h_clean = h.strip().strip('\ufeff').lower()
+        # Reemplazar cualquier caracter que no sea alfanumérico o guion bajo por guion bajo
+        h_clean = re.sub(r'[^a-z0-9_]', '_', h_clean)
+        # BQ no permite que empiece con número, si empieza con número agregamos un prefijo 'c_'
+        if h_clean and h_clean[0].isdigit():
+            h_clean = 'c_' + h_clean
+        clean_headers.append(h_clean)
     
     for h in clean_headers:
         if h == "employee_id":
@@ -2014,6 +2024,7 @@ def load_csv_to_bq(
     )
 
     print(f"📤 Cargando CSV a la tabla {table_ref_final.dataset_id}.{table_ref_final.table_id}...")
+    load_job = None
     try:
         with open(temp_csv_path, "rb") as f:
             load_job = bq_client.load_table_from_file(
