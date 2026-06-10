@@ -114,7 +114,7 @@ class ServiceTitanReportingAuth:
         self._token_time = time.time()
         return self._token
 
-    def _get(self, path):
+    def _get(self, path, params=None):
         """Llamada GET autenticada. Retorna el JSON parseado."""
         token = self.get_access_token()
         url   = f"{ST_BASE_URL}/{path}"
@@ -126,6 +126,7 @@ class ServiceTitanReportingAuth:
                 'ST-App-Key':    self.app_key,
                 'Accept':        'application/json'
             },
+            params=params,
             timeout=(30, 120)
         )
         response.raise_for_status()
@@ -143,17 +144,31 @@ class ServiceTitanReportingAuth:
             return result
         return result.get('data', [])
 
-    # ── Endpoint #2 ───────────────────────────────────────────────────────────
     def get_category_reports(self, category):
         """
         GET /reporting/v2/tenant/{tenant}/report-category/{cat}/reports
-        Retorna lista de reportes disponibles en esta categoría.
+        Retorna lista de reportes disponibles en esta categoría, manejando paginación.
         """
         path   = f"reporting/v2/tenant/{self.tenant_id}/report-category/{category}/reports"
-        result = self._get(path)
-        if isinstance(result, list):
-            return result
-        return result.get('data', [])
+        all_reports = []
+        page = 1
+        page_size = 50
+        
+        while True:
+            result = self._get(path, params={'page': page, 'pageSize': page_size})
+            if isinstance(result, list):
+                # Si la API retorna directamente una lista, no hay paginación estándar
+                all_reports.extend(result)
+                break
+                
+            data = result.get('data', [])
+            all_reports.extend(data)
+            
+            if not result.get('hasMore', False):
+                break
+            page += 1
+            
+        return all_reports
 
     # ── Endpoint #3 ───────────────────────────────────────────────────────────
     def get_report_details(self, category, report_id):
