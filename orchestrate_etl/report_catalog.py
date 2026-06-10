@@ -330,12 +330,15 @@ def discover_company(company, category_filter=None):
         print(f"   ❌ Error en Endpoint #1 (report-categories): {e}")
         return []
 
-    # Normalizar: categoría puede ser un string o un dict con 'name'
-    def cat_name(c):
+    # Normalizar: categoría puede ser un string o un dict
+    def get_cat_id(c):
+        return c if isinstance(c, str) else c.get('id', str(c))
+        
+    def get_cat_name(c):
         return c if isinstance(c, str) else c.get('name', str(c))
 
     if category_filter:
-        categories = [c for c in categories if cat_name(c).lower() == category_filter.lower()]
+        categories = [c for c in categories if get_cat_id(c).lower() == category_filter.lower() or get_cat_name(c).lower() == category_filter.lower()]
         print(f"   📂 Categorías (filtro='{category_filter}'): {len(categories)} encontradas")
     else:
         print(f"   📂 Categorías encontradas: {len(categories)}")
@@ -349,14 +352,15 @@ def discover_company(company, category_filter=None):
     now_ts        = datetime.now(timezone.utc).isoformat()
 
     for category in categories:
-        cat = cat_name(category)
-        print(f"\n   📁 Categoría: {cat}")
+        cat_id = get_cat_id(category)
+        cat_name = get_cat_name(category)
+        print(f"\n   📁 Categoría: {cat_name} (ID: {cat_id})")
 
         # ── NIVEL 2: Reportes de esta categoría ──────────────────────────────
         try:
-            reports = auth.get_category_reports(cat)
+            reports = auth.get_category_reports(cat_id)
         except Exception as e:
-            print(f"      ❌ Error en Endpoint #2 (category-reports) para '{cat}': {e}")
+            print(f"      ❌ Error en Endpoint #2 (category-reports) para '{cat_id}': {e}")
             continue
 
         print(f"      📄 Reportes: {len(reports)}")
@@ -371,7 +375,7 @@ def discover_company(company, category_filter=None):
 
             # ── NIVEL 3: Detalles del reporte (parámetros + fields) ──────────
             try:
-                details     = auth.get_report_details(cat, report_id)
+                details     = auth.get_report_details(cat_id, report_id)
                 parameters  = details.get('parameters', [])
                 fields      = details.get('fields', [])
                 modified_on = details.get('modifiedOn')
@@ -382,7 +386,7 @@ def discover_company(company, category_filter=None):
 
                 records.append({
                     "company_id":         company_id,
-                    "report_category":    cat,
+                    "report_category":    cat_id,
                     "report_id":          int(report_id),
                     "report_name":        report_name,
                     "report_description": description,
