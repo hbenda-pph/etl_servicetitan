@@ -28,8 +28,6 @@ CREATE TABLE IF NOT EXISTS `pph-central.management.report_catalog` (
   -- ── Configuración (el USUARIO llena estos campos) ───────────────────────
   is_active           BOOL,                 -- TRUE = el ETL lo extrae. Default: FALSE
   table_name          STRING,               -- Tabla destino en BQ (ej: "technician_timesheet_daily")
-  from_param          STRING,               -- Nombre del parámetro de la API para la fecha inicio (ej: "From" o "StartDate")
-  to_param            STRING,               -- Nombre del parámetro de la API para la fecha fin (ej: "To" o "EndDate")
   history_from        DATE,                 -- Fecha inicio del backfill histórico (ej: 2025-01-01)
 
   -- ── Auditoría ────────────────────────────────────────────────────────────
@@ -37,7 +35,7 @@ CREATE TABLE IF NOT EXISTS `pph-central.management.report_catalog` (
 
 )
 OPTIONS (
-  description = "Catálogo de reportes disponibles en la Reporting API de ServiceTitan por compañía. Poblada por orchestrate_etl/report_catalog.py. El usuario activa reportes con is_active=TRUE y configura table_name, from_param, to_param, history_from."
+  description = "Catálogo de reportes disponibles en la Reporting API de ServiceTitan por compañía. Poblada por orchestrate_etl/report_catalog.py. El usuario activa reportes con is_active=TRUE y configura table_name y history_from."
 );
 
 
@@ -49,8 +47,6 @@ UPDATE `pph-central.management.report_catalog`
 SET
   is_active    = TRUE,
   table_name   = 'technician_timesheet_daily',
-  from_param   = 'From',
-  to_param     = 'To',
   history_from = DATE '2025-01-01'
 WHERE
   report_name LIKE '%Technician Timesheet%'
