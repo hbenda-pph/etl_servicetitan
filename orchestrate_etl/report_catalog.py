@@ -62,8 +62,6 @@ CATALOG_SCHEMA = [
     bigquery.SchemaField("fields",             "JSON"),
     bigquery.SchemaField("is_active",          "BOOL"),
     bigquery.SchemaField("table_name",         "STRING"),
-    bigquery.SchemaField("from_param",         "STRING"),
-    bigquery.SchemaField("to_param",           "STRING"),
     bigquery.SchemaField("history_from",       "DATE"),
     bigquery.SchemaField("discovered_at",      "TIMESTAMP"),
 ]
@@ -278,7 +276,7 @@ def write_catalog_records(bq_client, records, dry_run=False):
             T.parameters         = S.parameters,
             T.fields             = S.fields,
             T.discovered_at      = S.discovered_at
-            -- is_active, table_name, from_param, to_param, history_from se PRESERVAN
+            -- is_active, table_name, history_from se PRESERVAN
 
         -- Insertar nuevos registros con is_active=FALSE
         WHEN NOT MATCHED THEN INSERT (
@@ -286,14 +284,14 @@ def write_catalog_records(bq_client, records, dry_run=False):
             report_category, report_id, report_name,
             report_description, report_modified_on,
             parameters, fields,
-            is_active, table_name, from_param, to_param, history_from,
+            is_active, table_name, history_from,
             discovered_at
         ) VALUES (
             S.company_id,
             S.report_category, S.report_id, S.report_name,
             S.report_description, S.report_modified_on,
             S.parameters, S.fields,
-            FALSE, NULL, NULL, NULL, NULL,
+            FALSE, NULL, NULL,
             S.discovered_at
         )
     """
