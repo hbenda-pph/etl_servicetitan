@@ -125,8 +125,8 @@ def process_company(row, endpoints_filter=None, dry_run=False):
         print(f"\n🔄 {'[DRY-RUN] ' if dry_run else ''}Descargando endpoint: {api_data} (tabla: {table_name})")
 
         timestamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_ts    = f"servicetitan_{table_name}_{timestamp}.json"
-        filename_alias = f"servicetitan_{table_name}.json"
+        filename_ts    = f"/tmp/servicetitan_{table_name}_{timestamp}.json"
+        filename_alias = f"/tmp/servicetitan_{table_name}.json"
 
         # ── Modo DRY-RUN ─────────────────────────────────────────────────────
         if dry_run:
@@ -200,8 +200,8 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             print(f"\n🔄 {'[DRY-RUN] ' if dry_run else ''}Descargando reporte: {report['report_name']} (tabla: {table_name})")
             
             timestamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename_ts    = f"servicetitan_{table_name}_{timestamp}.json"
-            filename_alias = f"servicetitan_{table_name}.json"
+            filename_ts    = f"/tmp/servicetitan_{table_name}_{timestamp}.json"
+            filename_alias = f"/tmp/servicetitan_{table_name}.json"
             
             if dry_run:
                 print(f"  📋 [DRY-RUN] Usaría POST a /reporting/v2/...")
