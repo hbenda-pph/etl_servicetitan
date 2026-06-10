@@ -113,9 +113,9 @@ def process_company(row, endpoints_filter=None, dry_run=False):
             if api_data in endpoints_filter or table_name in endpoints_filter
         ]
         if not endpoints_to_process:
-            print(f"⚠️  No se encontraron endpoints que coincidan con: {endpoints_filter}")
-            return
-        print(f"📋 Endpoints filtrados: {len(endpoints_to_process)}")
+            print(f"⚠️  No se encontraron endpoints estándar que coincidan con: {endpoints_filter}. Verificando reportes...")
+        else:
+            print(f"📋 Endpoints estándar filtrados: {len(endpoints_to_process)}")
     else:
         endpoints_to_process = all_endpoints
         print(f"📋 Total de endpoints: {len(endpoints_to_process)}")
