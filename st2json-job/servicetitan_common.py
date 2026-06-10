@@ -823,18 +823,35 @@ class ServiceTitanAuth:
                 body = {"parameters": params_list}
                 req_url = f"{url}?page={page}&pageSize={page_size}"
                 
-                response = requests.post(
-                    req_url,
-                    headers={
-                        'Authorization': f'Bearer {token}',
-                        'ST-App-Id': self.credentials['app_id'],
-                        'ST-App-Key': self.credentials['app_key'],
-                        'Accept': 'application/json'
-                    },
-                    json=body,
-                    timeout=(30, 600)
-                )
-                response.raise_for_status()
+                import time
+                max_retries = 5
+                retry_delay = 5
+                
+                for attempt in range(max_retries):
+                    response = requests.post(
+                        req_url,
+                        headers={
+                            'Authorization': f'Bearer {token}',
+                            'ST-App-Id': self.credentials['app_id'],
+                            'ST-App-Key': self.credentials['app_key'],
+                            'Accept': 'application/json'
+                        },
+                        json=body,
+                        timeout=(30, 600)
+                    )
+                    
+                    if response.status_code == 429:
+                        print(f"⚠️  [429 Too Many Requests] Esperando {retry_delay}s antes de reintentar la página {page} (intento {attempt+1}/{max_retries})...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                        
+                    response.raise_for_status()
+                    break
+                else:
+                    # Si agotó todos los intentos y sigue dando 429 (o similar)
+                    response.raise_for_status()
+                    
                 result = response.json()
                 
                 rows = result.get('data', [])
