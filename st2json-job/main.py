@@ -29,6 +29,7 @@ from servicetitan_common import (
     get_project_source,
     get_bigquery_project_id,
     load_endpoints_from_metadata,
+    load_report_catalog,
     ServiceTitanAuth,
     ensure_bucket_exists,
     upload_to_bucket,
@@ -180,6 +181,107 @@ def process_company(row, endpoints_filter=None, dry_run=False):
 
         except Exception as e:
             print(f"❌ Error en endpoint {api_data}: {str(e)}")
+
+    # ── Procesar Reportes (Reporting API) ─────────────────────────────────────
+    reports = load_report_catalog(company_id)
+    if endpoints_filter:
+        reports = [r for r in reports if r['table_name'] in endpoints_filter]
+        
+    if reports:
+        from datetime import timedelta
+        print(f"\n📊 Procesando {len(reports)} reportes del catálogo...")
+        bq_client_local = bigquery.Client(project=project_id)
+        
+        # Calculate yesterday
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        for report in reports:
+            table_name = report['table_name']
+            print(f"\n🔄 {'[DRY-RUN] ' if dry_run else ''}Descargando reporte: {report['report_name']} (tabla: {table_name})")
+            
+            timestamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename_ts    = f"servicetitan_{table_name}_{timestamp}.json"
+            filename_alias = f"servicetitan_{table_name}.json"
+            
+            if dry_run:
+                print(f"  📋 [DRY-RUN] Usaría POST a /reporting/v2/...")
+                print(f"  📋 [DRY-RUN] Archivos: {filename_ts}, {filename_alias}")
+                print(f"  📋 [DRY-RUN] Destino:  gs://{bucket_name}/")
+                continue
+                
+            try:
+                # Check if table exists
+                table_id = f"{project_id}.bronze.{table_name}"
+                try:
+                    bq_client_local.get_table(table_id)
+                    table_exists = True
+                except Exception:
+                    table_exists = False
+                
+                # Date calculation
+                start_date = report['history_from'].strftime("%Y-%m-%d") if report['history_from'] else "2025-01-01"
+                
+                if table_exists:
+                    # Incremental
+                    from_date = yesterday
+                    to_date   = yesterday
+                    print(f"  📅 Modo INCREMENTAL: {from_date} a {to_date}")
+                else:
+                    # Historical backfill
+                    from_date = start_date
+                    to_date   = yesterday
+                    print(f"  📅 Modo HISTÓRICO: {from_date} a {to_date}")
+                    
+                # Parse parameters schema
+                params_list = []
+                parameters_def = report.get('parameters')
+                if isinstance(parameters_def, str):
+                    try:
+                        parameters_def = json.loads(parameters_def)
+                    except Exception:
+                        parameters_def = []
+                
+                # Infer date parameters based on name and dataType
+                for p in (parameters_def or []):
+                    name = p.get('name', '')
+                    data_type = p.get('dataType', '')
+                    
+                    if data_type in ['Date', 'DateTime', 'DateOnly', 'System.DateTime']:
+                        name_lower = name.lower()
+                        if any(x in name_lower for x in ['from', 'start', 'begin']):
+                            params_list.append({"name": name, "value": from_date})
+                        elif any(x in name_lower for x in ['to', 'end']):
+                            params_list.append({"name": name, "value": to_date})
+                        elif name_lower == 'date':
+                            # Single date parameter, pass to_date (execution date)
+                            params_list.append({"name": name, "value": to_date})
+                
+                # Fetch data
+                total = st_client.get_report_data(
+                    report_category=report['report_category'],
+                    report_id=report['report_id'],
+                    fields_json=report['fields'],
+                    params_list=params_list,
+                    output_file=filename_alias,
+                    report_date=to_date
+                )
+                
+                print(f"📊 [REPORT MODE] Total registros descargados: {total}")
+                shutil.copy2(filename_alias, filename_ts)
+                
+                # Subir al bucket
+                upload_to_bucket(bucket_name, project_id, filename_ts, filename_ts)
+                upload_to_bucket(bucket_name, project_id, filename_alias, filename_alias)
+                
+                try:
+                    os.remove(filename_ts)
+                    os.remove(filename_alias)
+                except:
+                    pass
+                print(f"✅ Reporte {report['report_name']} procesado y archivos subidos.")
+                
+            except Exception as e:
+                print(f"❌ Error en reporte {report['report_name']}: {str(e)}")
 
 
 # =============================================================================

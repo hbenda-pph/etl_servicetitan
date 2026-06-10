@@ -171,7 +171,15 @@ def load_endpoints_from_metadata():
               AND table_name IS NOT NULL
               AND active = TRUE
               AND silver_use_bronze = TRUE
-            ORDER BY endpoint.name
+            UNION ALL
+            SELECT DISTINCT
+                CONCAT('report/', report_name) AS endpoint_name,
+                table_name,
+                TRUE AS use_merge,
+                TRUE AS is_production
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.report_catalog`
+            WHERE is_active = TRUE
+            ORDER BY endpoint_name
         '''
         results = client.query(query).result()
         endpoints = [(row.endpoint_name, row.table_name, row.use_merge, row.is_production) for row in results]
@@ -1824,46 +1832,97 @@ def execute_merge_or_insert(
                     print(f"⚠️ [execute_merge_or_insert] No se pudo agregar 'id' a {dataset_final}.{table_final}: {clean_bq_error(alter_id_err)}")
             
         if not final_has_id or not staging_has_id:
-            # Sin 'id' en uno de los dos lados: hacer TRUNCATE + INSERT (reemplazo total). Apropiado para tablas de settings.
-            reason = "no tiene 'id' en staging" if not staging_has_id else "no tiene 'id' en la tabla final"
-            print(f"\u26a0\ufe0f [execute_merge_or_insert] Tabla {dataset_final}.{table_final} {reason}. Usando TRUNCATE + INSERT (reemplazo total).")
-            try:
-                truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
-                bq_client.query(truncate_sql).result()
-                
-                # Para TRUNCATE+INSERT, usar columnas seguras sin 'id' (ya que falta en al menos uno de los lados)
-                trunc_cols = safe_cols
-                
-                # Reutilizar type_mismatches para castear en el INSERT
-                type_mismatches = type_mismatches or {}
-                def _col_trunc_insert_expr(col):
-                    if col in type_mismatches:
-                        final_type = type_mismatches[col]['final']
-                        BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
-                        final_type_sql = BQ_ALIASES.get(final_type, final_type)
-                        return f'SAFE_CAST(S.{col} AS {final_type_sql})'
-                    return f'S.{col}'
+            # Check for _report_date before falling back to full TRUNCATE
+            staging_has_report_date = any(col.name == '_report_date' for col in staging_schema)
+            final_has_report_date = any(col.name == '_report_date' for col in final_table_refresh.schema)
+            
+            if staging_has_report_date and final_has_report_date:
+                reason = "No tiene 'id' pero tiene '_report_date'"
+                print(f"📅 [execute_merge_or_insert] Tabla {dataset_final}.{table_final} {reason}. Usando DELETE particionado + INSERT.")
+                try:
+                    # Date-Partitioned Delete
+                    delete_sql = f"""
+                        DELETE FROM `{project_id}.{dataset_final}.{table_final}`
+                        WHERE _report_date IN (
+                            SELECT DISTINCT _report_date 
+                            FROM `{project_id}.{dataset_staging}.{table_staging}`
+                            WHERE _report_date IS NOT NULL
+                        )
+                    """
+                    bq_client.query(delete_sql).result()
                     
-                insert_trunc_sql = f'''
-                    INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
-                        {', '.join(trunc_cols)}, _etl_synced, _etl_operation
-                    )
-                    SELECT {', '.join([_col_trunc_insert_expr(c) for c in trunc_cols])},
-                           CURRENT_TIMESTAMP(), 'INSERT'
-                    FROM `{project_id}.{dataset_staging}.{table_staging}` S
-                '''
-                bq_client.query(insert_trunc_sql).result()
-                merge_time = time.time() - merge_start
-                staging_refresh = bq_client.get_table(staging_table.reference)
-                rows_written = staging_refresh.num_rows
-                print(f"✅ TRUNCATE+INSERT ejecutado: {dataset_final}.{table_final} reemplazado en {merge_time:.1f}s")
-                update_monitoring_snapshot(bq_client, company_id, endpoint_name, project_id, dataset_final, table_final, rows=rows_written, duration=merge_time)
-                return (True, merge_time, None)
-            except Exception as trunc_err:
-                merge_time = time.time() - merge_start
-                err = clean_bq_error(trunc_err)
-                print(f"❌ [execute_merge_or_insert] TRUNCATE+INSERT falló para {dataset_final}.{table_final}: {err}")
-                return (False, merge_time, err)
+                    # Then Insert
+                    trunc_cols = safe_cols
+                    type_mismatches = type_mismatches or {}
+                    def _col_trunc_insert_expr(col):
+                        if col in type_mismatches:
+                            final_type = type_mismatches[col]['final']
+                            BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
+                            final_type_sql = BQ_ALIASES.get(final_type, final_type)
+                            return f'SAFE_CAST(S.{col} AS {final_type_sql})'
+                        return f'S.{col}'
+                        
+                    insert_trunc_sql = f'''
+                        INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
+                            {', '.join(trunc_cols)}, _etl_synced, _etl_operation
+                        )
+                        SELECT {', '.join([_col_trunc_insert_expr(c) for c in trunc_cols])},
+                               CURRENT_TIMESTAMP(), 'INSERT'
+                        FROM `{project_id}.{dataset_staging}.{table_staging}` S
+                    '''
+                    bq_client.query(insert_trunc_sql).result()
+                    merge_time = time.time() - merge_start
+                    staging_refresh = bq_client.get_table(staging_table.reference)
+                    rows_written = staging_refresh.num_rows
+                    print(f"✅ DELETE+INSERT ejecutado: {dataset_final}.{table_final} actualizado en {merge_time:.1f}s")
+                    update_monitoring_snapshot(bq_client, company_id, endpoint_name, project_id, dataset_final, table_final, rows=rows_written, duration=merge_time)
+                    return (True, merge_time, None)
+                except Exception as part_err:
+                    merge_time = time.time() - merge_start
+                    err = clean_bq_error(part_err)
+                    print(f"❌ [execute_merge_or_insert] DELETE+INSERT falló para {dataset_final}.{table_final}: {err}")
+                    return (False, merge_time, err)
+            else:
+                # Sin 'id' en uno de los dos lados: hacer TRUNCATE + INSERT (reemplazo total). Apropiado para tablas de settings.
+                reason = "no tiene 'id' en staging" if not staging_has_id else "no tiene 'id' en la tabla final"
+                print(f"⚠️ [execute_merge_or_insert] Tabla {dataset_final}.{table_final} {reason}. Usando TRUNCATE + INSERT (reemplazo total).")
+                try:
+                    truncate_sql = f"TRUNCATE TABLE `{project_id}.{dataset_final}.{table_final}`"
+                    bq_client.query(truncate_sql).result()
+                    
+                    # Para TRUNCATE+INSERT, usar columnas seguras sin 'id' (ya que falta en al menos uno de los lados)
+                    trunc_cols = safe_cols
+                    
+                    # Reutilizar type_mismatches para castear en el INSERT
+                    type_mismatches = type_mismatches or {}
+                    def _col_trunc_insert_expr(col):
+                        if col in type_mismatches:
+                            final_type = type_mismatches[col]['final']
+                            BQ_ALIASES = {'INTEGER': 'INT64', 'FLOAT': 'FLOAT64', 'BOOLEAN': 'BOOL'}
+                            final_type_sql = BQ_ALIASES.get(final_type, final_type)
+                            return f'SAFE_CAST(S.{col} AS {final_type_sql})'
+                        return f'S.{col}'
+                        
+                    insert_trunc_sql = f'''
+                        INSERT INTO `{project_id}.{dataset_final}.{table_final}` (
+                            {', '.join(trunc_cols)}, _etl_synced, _etl_operation
+                        )
+                        SELECT {', '.join([_col_trunc_insert_expr(c) for c in trunc_cols])},
+                               CURRENT_TIMESTAMP(), 'INSERT'
+                        FROM `{project_id}.{dataset_staging}.{table_staging}` S
+                    '''
+                    bq_client.query(insert_trunc_sql).result()
+                    merge_time = time.time() - merge_start
+                    staging_refresh = bq_client.get_table(staging_table.reference)
+                    rows_written = staging_refresh.num_rows
+                    print(f"✅ TRUNCATE+INSERT ejecutado: {dataset_final}.{table_final} reemplazado en {merge_time:.1f}s")
+                    update_monitoring_snapshot(bq_client, company_id, endpoint_name, project_id, dataset_final, table_final, rows=rows_written, duration=merge_time)
+                    return (True, merge_time, None)
+                except Exception as trunc_err:
+                    merge_time = time.time() - merge_start
+                    err = clean_bq_error(trunc_err)
+                    print(f"❌ [execute_merge_or_insert] TRUNCATE+INSERT falló para {dataset_final}.{table_final}: {err}")
+                    return (False, merge_time, err)
 
         # Funciones para obtener la expresión a evaluar (S.col o SAFE_CAST)
         type_mismatches = type_mismatches or {}

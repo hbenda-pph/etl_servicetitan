@@ -159,6 +159,34 @@ def load_endpoints_from_metadata():
             ("jpm/v2/tenant", "jobs/cancel-reasons", "job_cancel_reason")
         ]
 
+def load_report_catalog(company_id):
+    """
+    Carga los reportes activos configurados en report_catalog para una compañía.
+    Retorna lista de diccionarios con la config del reporte.
+    """
+    try:
+        client = bigquery.Client(project=METADATA_PROJECT)
+        query = f"""
+            SELECT
+                report_category,
+                report_id,
+                report_name,
+                parameters,
+                fields,
+                table_name,
+                history_from
+            FROM `{METADATA_PROJECT}.{METADATA_DATASET}.report_catalog`
+            WHERE is_active = TRUE
+              AND company_id = {company_id}
+        """
+        results = list(client.query(query).result())
+        reports = [dict(row) for row in results]
+        print(f"📋 Reportes activos encontrados para company {company_id}: {len(reports)}")
+        return reports
+    except Exception as e:
+        print(f"⚠️  Error cargando report_catalog para company {company_id}: {str(e)}")
+        return []
+
 def get_balanced_tasks(bq_client, results, task_count, task_index):
     """
     Distribuye las compañías entre las tareas de Cloud Run usando un algoritmo
@@ -767,6 +795,78 @@ class ServiceTitanAuth:
             
             f.write('\n]')
         
+        return total_records
+
+    def get_report_data(self, report_category, report_id, fields_json, params_list, output_file, report_date=None):
+        """
+        Descarga datos de un reporte específico (Endpoint POST).
+        """
+        url = f"{self.BASE_API_URL}/reporting/v2/tenant/{self.credentials['tenant_id']}/report-category/{report_category}/reports/{report_id}/data"
+        
+        if isinstance(fields_json, str):
+            fields_def = json.loads(fields_json)
+        else:
+            fields_def = fields_json
+            
+        field_names = [f.get('name') for f in fields_def]
+        
+        page = 1
+        page_size = 5000
+        total_records = 0
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write('[\n')
+            first_item = True
+            
+            while True:
+                token = self.get_access_token()
+                body = {"parameters": params_list}
+                req_url = f"{url}?page={page}&pageSize={page_size}"
+                
+                response = requests.post(
+                    req_url,
+                    headers={
+                        'Authorization': f'Bearer {token}',
+                        'ST-App-Id': self.credentials['app_id'],
+                        'ST-App-Key': self.credentials['app_key'],
+                        'Accept': 'application/json'
+                    },
+                    json=body,
+                    timeout=(30, 600)
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                rows = result.get('data', [])
+                
+                if not rows:
+                    break
+                    
+                for row in rows:
+                    obj = {}
+                    for i, val in enumerate(row):
+                        if i < len(field_names):
+                            obj[field_names[i]] = val
+                            
+                    # Inject date partition key
+                    if report_date:
+                        obj['_report_date'] = report_date
+                            
+                    if not first_item:
+                        f.write(',\n')
+                    json.dump(obj, f, ensure_ascii=False, indent=2)
+                    first_item = False
+                
+                total_records += len(rows)
+                
+                has_more = result.get('hasMore', False)
+                if not has_more or len(rows) < page_size:
+                    break
+                    
+                page += 1
+                
+            f.write('\n]')
+            
         return total_records
 
 
