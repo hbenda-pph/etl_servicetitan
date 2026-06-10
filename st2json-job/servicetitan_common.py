@@ -827,6 +827,10 @@ class ServiceTitanAuth:
                 max_retries = 5
                 retry_delay = 5
                 
+                if page == 1:
+                    print(f"  🔍 [DEBUG API] POST URL: {req_url}")
+                    print(f"  🔍 [DEBUG API] PAYLOAD: {json.dumps(body)}")
+                
                 for attempt in range(max_retries):
                     response = requests.post(
                         req_url,
