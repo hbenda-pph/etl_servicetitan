@@ -167,8 +167,8 @@ def process_company(row, endpoints_filter=None, dry_run=False):
                     json.dump(data, f, ensure_ascii=False, indent=2)
 
             # Subir ambos archivos al bucket
-            upload_to_bucket(bucket_name, project_id, filename_ts, filename_ts)
-            upload_to_bucket(bucket_name, project_id, filename_alias, filename_alias)
+            upload_to_bucket(bucket_name, project_id, filename_ts, os.path.basename(filename_ts))
+            upload_to_bucket(bucket_name, project_id, filename_alias, os.path.basename(filename_alias))
 
             # Borrar archivos locales
             try:
@@ -270,8 +270,8 @@ def process_company(row, endpoints_filter=None, dry_run=False):
                 shutil.copy2(filename_alias, filename_ts)
                 
                 # Subir al bucket
-                upload_to_bucket(bucket_name, project_id, filename_ts, filename_ts)
-                upload_to_bucket(bucket_name, project_id, filename_alias, filename_alias)
+                upload_to_bucket(bucket_name, project_id, filename_ts, os.path.basename(filename_ts))
+                upload_to_bucket(bucket_name, project_id, filename_alias, os.path.basename(filename_alias))
                 
                 try:
                     os.remove(filename_ts)
