@@ -30,7 +30,6 @@ from servicetitan_common import (
     ensure_audio_bucket_exists,
     ensure_call_recordings_table_exists,
     upload_to_bucket,
-    upload_audio_stream_to_bucket,
     parse_duration_seconds,
     get_balanced_tasks,
 )
@@ -248,7 +247,7 @@ def process_company(row, dry_run=False, limit=None):
 
             if http_code == 200:
                 # ── Audio disponible: streaming directo a GCS ────────────────
-                file_size = upload_audio_stream_to_bucket(
+                file_size = upload_to_bucket(
                     storage_client=storage_client,
                     bucket_name=bucket_name,
                     dest_blob_name=dest_blob_name,
@@ -313,7 +312,9 @@ def process_company(row, dry_run=False, limit=None):
             for rec in metadata_records:
                 f_ts.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        upload_to_bucket(bucket_name, project_id, metadata_filename_ts, f"metadata/{os.path.basename(metadata_filename_ts)}")
+        metadata_blob = storage_client.bucket(bucket_name).blob(f"metadata/{os.path.basename(metadata_filename_ts)}")
+        metadata_blob.upload_from_filename(metadata_filename_ts)
+        print(f"  📤 Respaldo metadata subido a gs://{bucket_name}/metadata/{os.path.basename(metadata_filename_ts)}")
         try:
             os.remove(metadata_filename_ts)
         except Exception:

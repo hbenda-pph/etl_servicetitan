@@ -186,7 +186,7 @@ def ensure_audio_bucket_exists(project_id, region="US"):
     return bucket_name
 
 
-def upload_audio_stream_to_bucket(storage_client, bucket_name, dest_blob_name, response_stream, content_type="audio/mpeg"):
+def upload_to_bucket(storage_client, bucket_name, dest_blob_name, response_stream, content_type="audio/mpeg"):
     """
     Sube directamente el stream de bytes de la petición HTTP a Cloud Storage
     sin almacenar el archivo en disco ni saturar memoria RAM.
