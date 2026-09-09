@@ -16,11 +16,19 @@ Modos disponibles:
     ETL_MODE=test  → Ejecución local/manual
 """
 
+import sys
 import argparse
 import json
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
+
+# Garantizar compatibilidad de encoding en Windows console (emojis / unicode)
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from google.cloud import bigquery, storage
 
 from servicetitan_common import (
@@ -54,31 +62,58 @@ def get_pending_calls(client, project_id, limit=None):
     """
     Obtiene las llamadas que tienen duración > 0 y que aún no han sido
     procesadas o cuyo estatus anterior fue fallido/dañado (status < 0).
+    Si la tabla bronze.call_recordings aún no existe, consulta directamente la tabla call.
     """
     dataset_suffix = project_id.replace("-", "_")
     table_call = f"`{project_id}.servicetitan_{dataset_suffix}.call`"
     table_recordings = f"`{project_id}.bronze.call_recordings`"
     limit_clause = f"LIMIT {limit}" if limit else ""
 
-    query = f"""
-        SELECT 
-            c.lead_call_id,
-            c.id,
-            c.lead_call_received_on,
-            c.lead_call_duration,
-            c.lead_call_call_type,
-            c.lead_call_direction,
-            c.lead_call_recording_url
-        FROM {table_call} c
-        LEFT JOIN {table_recordings} r
-            ON c.lead_call_id = r.lead_call_id
-        WHERE (r.lead_call_id IS NULL OR r.status < 0)
-          AND (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
-          AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
-        ORDER BY c.lead_call_received_on DESC
-        {limit_clause}
-    """
+    # Verificar si la tabla de recordings ya existe
+    try:
+        client.get_table(f"{project_id}.bronze.call_recordings")
+        recordings_exists = True
+    except Exception:
+        recordings_exists = False
+
+    if recordings_exists:
+        query = f"""
+            SELECT 
+                c.lead_call_id,
+                c.id,
+                c.lead_call_received_on,
+                c.lead_call_duration,
+                c.lead_call_call_type,
+                c.lead_call_direction,
+                c.lead_call_recording_url
+            FROM {table_call} c
+            LEFT JOIN {table_recordings} r
+                ON c.lead_call_id = r.lead_call_id
+            WHERE (r.lead_call_id IS NULL OR r.status < 0)
+              AND (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
+              AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
+            ORDER BY c.lead_call_received_on DESC
+            {limit_clause}
+        """
+    else:
+        query = f"""
+            SELECT 
+                c.lead_call_id,
+                c.id,
+                c.lead_call_received_on,
+                c.lead_call_duration,
+                c.lead_call_call_type,
+                c.lead_call_direction,
+                c.lead_call_recording_url
+            FROM {table_call} c
+            WHERE (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
+              AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
+            ORDER BY c.lead_call_received_on DESC
+            {limit_clause}
+        """
+
     return list(client.query(query).result())
+
 
 
 # =============================================================================
@@ -93,7 +128,7 @@ def save_call_recordings_to_bigquery(bq_client, project_id, records):
     if not records:
         return
 
-    timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     temp_table_id = f"{project_id}.bronze._stg_call_rec_{timestamp_str}"
     target_table_id = f"{project_id}.bronze.call_recordings"
 
@@ -219,7 +254,7 @@ def process_company(row, dry_run=False, limit=None):
     audios_guardados = 0
     sin_audio_count  = 0
     errores_count    = 0
-    synced_timestamp = datetime.utcnow().isoformat()
+    synced_timestamp = datetime.now(timezone.utc).isoformat()
 
     # ── Extracción HTTP, Streaming a GCS y Armado de Metadata ─────────────────
     for idx, call in enumerate(pending_calls, 1):

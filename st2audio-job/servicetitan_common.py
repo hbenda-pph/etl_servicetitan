@@ -29,24 +29,28 @@ METADATA_TABLE = "metadata_consolidated_tables"
 
 def get_project_source():
     """
-    Obtiene el proyecto del ambiente actual.
+    Obtiene el proyecto del ambiente actual para consultas maestras (settings.companies).
     Prioridad:
     1. Variable de entorno GCP_PROJECT (establecida por Cloud Run Jobs)
     2. Variable de entorno GOOGLE_CLOUD_PROJECT
-    3. Proyecto por defecto del cliente BigQuery
-    4. Fallback 'platform-partners-qua'
+    3. Proyecto por defecto del cliente BigQuery (si es un proyecto central)
+    4. Fallback 'pph-central'
     """
     project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
     if project:
+        if project not in ("platform-partners-pro", "constant-height-455614-i0", "platform-partners-qua", "platform-partners-des", "pph-central", "pph-inbox"):
+            return "pph-central"
         return project
     
     try:
         client = bigquery.Client()
-        return client.project
+        if client.project and client.project in ("platform-partners-pro", "constant-height-455614-i0", "platform-partners-qua", "platform-partners-des", "pph-central", "pph-inbox"):
+            return client.project
     except Exception:
         pass
     
-    return "platform-partners-qua"
+    return "pph-central"
+
 
 
 def get_bigquery_project_id():
