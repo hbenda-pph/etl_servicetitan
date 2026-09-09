@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 
 # Garantizar compatibilidad de encoding en Windows console (emojis / unicode)
@@ -63,6 +64,7 @@ def get_pending_calls(client, project_id, limit=None):
     Obtiene las llamadas que tienen duración > 0 y que aún no han sido
     procesadas o cuyo estatus anterior fue fallido/dañado (status < 0).
     Si la tabla bronze.call_recordings aún no existe, consulta directamente la tabla call.
+    Retorna el iterator de BigQuery (streaming) sin saturar memoria RAM.
     """
     dataset_suffix = project_id.replace("-", "_")
     table_call = f"`{project_id}.servicetitan_{dataset_suffix}.call`"
@@ -112,8 +114,9 @@ def get_pending_calls(client, project_id, limit=None):
             {limit_clause}
         """
 
-    return list(client.query(query).result())
-
+    print("  🔍 Ejecutando consulta SQL en BigQuery para identificar llamadas pendientes...", flush=True)
+    query_job = client.query(query)
+    return query_job.result()
 
 
 # =============================================================================
@@ -184,20 +187,20 @@ def save_call_recordings_to_bigquery(bq_client, project_id, records):
 
     # 3. Eliminar tabla temporal de staging
     bq_client.delete_table(temp_table_id, not_found_ok=True)
-    print(f"  💾 {len(records)} registros guardados/sincronizados en `{target_table_id}`")
+    print(f"  💾 {len(records)} registros sincronizados en `{target_table_id}`", flush=True)
 
 
 # =============================================================================
 # NÚCLEO: process_company()
 # =============================================================================
 
-def process_company(row, dry_run=False, limit=None):
+def process_company(row, dry_run=False, limit=None, batch_size=100):
     """
     1. Asegura bucket `{project_id}_audio` y tabla `{project_id}.bronze.call_recordings`.
-    2. Consulta BigQuery (LEFT JOIN) para obtener llamadas pendientes.
+    2. Consulta BigQuery (LEFT JOIN) para obtener llamadas pendientes en streaming.
     3. Realiza petición HTTP binaria a Telecom API para cada llamada.
     4. Transmite el stream a Cloud Storage (`gs://{project_id}_audio/{lead_call_id}.mp3`).
-    5. Guarda metadatos y estatus en BigQuery (`bronze.call_recordings`).
+    5. Guarda metadatos y estatus en BigQuery en lotes periódicos (batch_size).
     """
     company_id       = row.company_id
     company_name     = row.company_name
@@ -209,11 +212,11 @@ def process_company(row, dry_run=False, limit=None):
     app_key          = row.app_key
     project_id       = row.company_project_id
 
-    print(f"\n{'='*80}")
-    print(f"🏢 Procesando Audios: {company_name} (ID: {company_id}) | Proyecto: {project_id}")
+    print(f"\n{'='*80}", flush=True)
+    print(f"🏢 Procesando Audios: {company_name} (ID: {company_id}) | Proyecto: {project_id}", flush=True)
     if dry_run:
-        print("🔍 MODO DRY-RUN: Solo mostrando acciones, sin ejecutar.")
-    print(f"{'='*80}")
+        print("🔍 MODO DRY-RUN: Solo mostrando acciones, sin ejecutar.", flush=True)
+    print(f"{'='*80}", flush=True)
 
     if not project_id:
         raise ValueError(
@@ -229,43 +232,73 @@ def process_company(row, dry_run=False, limit=None):
         st_client      = None
         storage_client = None
     else:
-        # Validar / crear bucket y tabla destino
         bucket_name = ensure_audio_bucket_exists(project_id)
         ensure_call_recordings_table_exists(bq_client, project_id)
         st_client      = ServiceTitanAuth(app_id, client_id, client_secret, tenant_id, app_key)
         storage_client = storage.Client(project=project_id)
 
     # ── Consulta SQL de llamadas pendientes ──────────────────────────────────
-    print(f"📋 Consultando llamadas pendientes para {company_name}...")
+    print(f"📋 Consultando llamadas pendientes para {company_name}...", flush=True)
     try:
-        pending_calls = get_pending_calls(bq_client, project_id, limit=limit)
+        pending_calls_iterator = get_pending_calls(bq_client, project_id, limit=limit)
     except Exception as e:
-        print(f"❌ Error al consultar llamadas pendientes: {str(e)}")
+        print(f"❌ Error al consultar llamadas pendientes: {str(e)}", flush=True)
         return
 
-    total_calls = len(pending_calls)
-    print(f"📊 Total llamadas pendientes a procesar: {total_calls}")
+    total_calls = pending_calls_iterator.total_rows
+    print(f"📊 Total llamadas pendientes a procesar: {total_calls:,}", flush=True)
 
     if total_calls == 0:
-        print("✅ No hay llamadas pendientes de descarga para esta compañía.")
+        print("✅ No hay llamadas pendientes de descarga para esta compañía.", flush=True)
         return
 
-    metadata_records = []
+    metadata_batch = []
     audios_guardados = 0
     sin_audio_count  = 0
     errores_count    = 0
-    synced_timestamp = datetime.now(timezone.utc).isoformat()
+    total_procesadas = 0
+    start_time = datetime.now()
+
+    def flush_batch(records_to_flush):
+        """Guarda el lote actual en BigQuery y en Cloud Storage (metadata/)."""
+        if dry_run or not records_to_flush:
+            return
+        # 1. BigQuery MERGE
+        save_call_recordings_to_bigquery(bq_client, project_id, records_to_flush)
+        # 2. Respaldo JSONL en GCS
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        tmp_dir = tempfile.gettempdir()
+        tmp_file = os.path.join(tmp_dir, f"call_recordings_batch_{ts}.jsonl")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            for r in records_to_flush:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        try:
+            blob = storage_client.bucket(bucket_name).blob(f"metadata/batch_{ts}.jsonl")
+            blob.upload_from_filename(tmp_file)
+            print(f"  📤 Respaldo metadata subido a gs://{bucket_name}/metadata/batch_{ts}.jsonl", flush=True)
+            os.remove(tmp_file)
+        except Exception as upload_err:
+            print(f"  ⚠️  No se pudo subir respaldo JSONL a GCS: {upload_err}", flush=True)
 
     # ── Extracción HTTP, Streaming a GCS y Armado de Metadata ─────────────────
-    for idx, call in enumerate(pending_calls, 1):
+    for idx, call in enumerate(pending_calls_iterator, 1):
+        total_procesadas = idx
         lead_call_id = call.lead_call_id
         duration_str = call.lead_call_duration
+        synced_timestamp = datetime.now(timezone.utc).isoformat()
 
-        print(f"\n🔄 [{idx}/{total_calls}] Llamada ID: {lead_call_id} | Duración: {duration_str}")
+        pct = (idx / total_calls * 100) if total_calls > 0 else 0
+        elapsed_sec = (datetime.now() - start_time).total_seconds()
+        rate = idx / elapsed_sec if elapsed_sec > 0 else 0
+        remaining_calls = total_calls - idx
+        eta_sec = remaining_calls / rate if rate > 0 else 0
+        eta_str = f"{eta_sec/3600:.1f}h" if eta_sec >= 3600 else f"{eta_sec/60:.1f}m"
+
+        print(f"\n🔄 [{idx:,}/{total_calls:,}] ({pct:.2f}%) | Vel: {rate:.1f} c/s | ETA: {eta_str} | Llamada ID: {lead_call_id} | Duración: {duration_str}", flush=True)
 
         if dry_run:
-            print(f"  📋 [DRY-RUN] Solicitaría GET /telecom/v2/tenant/{tenant_id}/calls/{lead_call_id}/recording")
-            print(f"  📋 [DRY-RUN] Destino GCS: gs://{bucket_name}/{lead_call_id}.mp3")
+            print(f"  📋 [DRY-RUN] Solicitaría GET /telecom/v2/tenant/{tenant_id}/calls/{lead_call_id}/recording", flush=True)
+            print(f"  📋 [DRY-RUN] Destino GCS: gs://{bucket_name}/{lead_call_id}.mp3", flush=True)
             continue
 
         dest_blob_name = f"{lead_call_id}.mp3"
@@ -293,7 +326,7 @@ def process_company(row, dry_run=False, limit=None):
                 content_type = "audio/mpeg"
                 status = 0  # 0: Almacenado / Listo para ML
                 audios_guardados += 1
-                print(f"  ✅ Audio guardado en gs://{bucket_name}/{dest_blob_name} ({file_size} bytes)")
+                print(f"  ✅ Audio guardado en gs://{bucket_name}/{dest_blob_name} ({file_size:,} bytes)", flush=True)
 
             elif http_code in (404, 204):
                 # ── Sin audio en ServiceTitan ────────────────────────────────
@@ -301,7 +334,7 @@ def process_company(row, dry_run=False, limit=None):
                 dest_blob_name = None
                 error_msg = f"Audio not available in ServiceTitan (HTTP {http_code})"
                 sin_audio_count += 1
-                print(f"  ⚠️  Llamada sin grabación en ServiceTitan (HTTP {http_code})")
+                print(f"  ⚠️  Llamada sin grabación en ServiceTitan (HTTP {http_code})", flush=True)
 
             else:
                 # ── Error HTTP temporal (5xx, 429, etc.) ──────────────────────
@@ -309,14 +342,14 @@ def process_company(row, dry_run=False, limit=None):
                 dest_blob_name = None
                 error_msg = f"HTTP {http_code}: {response.text[:200]}"
                 errores_count += 1
-                print(f"  ❌ Error HTTP {http_code} al solicitar grabación")
+                print(f"  ❌ Error HTTP {http_code} al solicitar grabación", flush=True)
 
         except Exception as e:
             status = -1
             dest_blob_name = None
             error_msg = str(e)[:300]
             errores_count += 1
-            print(f"  ❌ Excepción descargando llamada {lead_call_id}: {error_msg}")
+            print(f"  ❌ Excepción descargando llamada {lead_call_id}: {error_msg}", flush=True)
 
         # Estructura normalizada de 12 campos para bronze.call_recordings
         record = {
@@ -333,33 +366,30 @@ def process_company(row, dry_run=False, limit=None):
             "_etl_synced": synced_timestamp,
             "_etl_operation": "INSERT"
         }
-        metadata_records.append(record)
+        metadata_batch.append(record)
 
-    # ── Guardar en BigQuery y backup local/GCS ───────────────────────────────
-    if not dry_run and metadata_records:
-        # 1. Guardar/Actualizar directamente en BigQuery bronze.call_recordings
-        save_call_recordings_to_bigquery(bq_client, project_id, metadata_records)
+        # ── Sincronización periódica por lotes (Batch Flush) ─────────────────
+        if not dry_run and len(metadata_batch) >= batch_size:
+            print(f"\n📦 Sincronizando lote de {len(metadata_batch)} registros en BigQuery...", flush=True)
+            flush_batch(metadata_batch)
+            metadata_batch = []
+            print(f"📊 Progreso acumulado: {idx:,}/{total_calls:,} | Guardados: {audios_guardados:,} | Sin audio: {sin_audio_count:,} | Errores: {errores_count:,}\n", flush=True)
 
-        # 2. Respaldo JSONL en GCS (metadata/)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        metadata_filename_ts = f"/tmp/servicetitan_call_recordings_{timestamp}.jsonl"
-        with open(metadata_filename_ts, "w", encoding="utf-8") as f_ts:
-            for rec in metadata_records:
-                f_ts.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # ── Guardar remanente final ──────────────────────────────────────────────
+    if not dry_run and metadata_batch:
+        print(f"\n📦 Sincronizando último lote de {len(metadata_batch)} registros en BigQuery...", flush=True)
+        flush_batch(metadata_batch)
+        metadata_batch = []
 
-        metadata_blob = storage_client.bucket(bucket_name).blob(f"metadata/{os.path.basename(metadata_filename_ts)}")
-        metadata_blob.upload_from_filename(metadata_filename_ts)
-        print(f"  📤 Respaldo metadata subido a gs://{bucket_name}/metadata/{os.path.basename(metadata_filename_ts)}")
-        try:
-            os.remove(metadata_filename_ts)
-        except Exception:
-            pass
-
-        print(f"\n📊 Resumen Extracción {company_name}:")
-        print(f"   🎵 Audios descargados (status=0) : {audios_guardados}")
-        print(f"   ⚠️  Sin audio (status=-2)         : {sin_audio_count}")
-        print(f"   ❌ Errores (status=-1)           : {errores_count}")
-        print(f"   📝 Registros guardados en BQ     : {len(metadata_records)}")
+    elapsed_total = (datetime.now() - start_time).total_seconds()
+    print(f"\n{'='*80}", flush=True)
+    print(f"🏁 Resumen Extracción {company_name}:", flush=True)
+    print(f"   ⏱️  Tiempo total              : {elapsed_total/60:.1f} min ({total_procesadas/elapsed_total if elapsed_total>0 else 0:.1f} llamadas/s)", flush=True)
+    print(f"   🎵 Audios descargados (status=0) : {audios_guardados:,}", flush=True)
+    print(f"   ⚠️  Sin audio (status=-2)         : {sin_audio_count:,}", flush=True)
+    print(f"   ❌ Errores (status=-1)           : {errores_count:,}", flush=True)
+    print(f"   📝 Total procesadas              : {total_procesadas:,}", flush=True)
+    print(f"{'='*80}\n", flush=True)
 
 
 # =============================================================================
