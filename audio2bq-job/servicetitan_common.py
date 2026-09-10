@@ -26,9 +26,20 @@ warnings.filterwarnings("ignore", message=".*quota project.*", category=UserWarn
 warnings.filterwarnings("ignore", message=".*end user credentials.*", category=UserWarning)
 
 
+# Configuración central de metadata
+METADATA_PROJECT = "pph-central"
+METADATA_DATASET = "management"
+METADATA_TABLE = "metadata_consolidated_tables"
+
+
 def get_project_source() -> str:
     """
     Obtiene el proyecto del ambiente actual para consultas maestras (settings.companies).
+    Prioridad:
+    1. Variable de entorno GCP_PROJECT (establecida por Cloud Run Jobs)
+    2. Variable de entorno GOOGLE_CLOUD_PROJECT
+    3. Proyecto por defecto del cliente BigQuery (si es un proyecto central)
+    4. Fallback 'pph-central'
     """
     project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
     if project:
@@ -37,9 +48,12 @@ def get_project_source() -> str:
         return project
     
     try:
-        client = bigquery.Client()
-        if client.project and client.project in ("platform-partners-pro", "constant-height-455614-i0", "platform-partners-qua", "platform-partners-des", "pph-central", "pph-inbox"):
-            return client.project
+        import subprocess
+        res = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and res.stdout.strip():
+            proj = res.stdout.strip()
+            if proj in ("platform-partners-pro", "constant-height-455614-i0", "platform-partners-qua", "platform-partners-des", "pph-central", "pph-inbox"):
+                return proj
     except Exception:
         pass
     
@@ -48,13 +62,59 @@ def get_project_source() -> str:
 
 def get_bigquery_project_id() -> str:
     """
-    Obtiene el project_id real para queries SQL.
-    En PRO, GCP_PROJECT contiene 'platform-partners-pro', pero se usa 'constant-height-455614-i0'.
+    Obtiene el project_id real para usar en queries SQL.
+    En PRO, GCP_PROJECT contiene 'platform-partners-pro',
+    pero se usa 'constant-height-455614-i0' (project_id) en las queries.
     """
-    gcp_project = os.environ.get('GCP_PROJECT') or os.environ.get('GOOGLE_CLOUD_PROJECT')
-    if gcp_project == 'platform-partners-pro':
-        return 'constant-height-455614-i0'
-    return gcp_project or 'pph-central'
+    project_source = get_project_source()
+    if project_source == "platform-partners-pro":
+        return "constant-height-455614-i0"
+    return project_source
+
+
+def get_balanced_tasks(bq_client, results, task_count, task_index):
+    """
+    Distribuye las compañías entre las tareas de Cloud Run usando un algoritmo
+    Greedy para balancear la carga basada en métricas históricas de duración.
+    """
+    if task_count <= 1:
+        return results
+
+    weights = {}
+    try:
+        query = f"""
+            SELECT company_id, SUM(actual_duration) as total_duration
+            FROM `{METADATA_PROJECT}.management.etl_monitoring_snapshot`
+            WHERE updated_at >= CURRENT_TIMESTAMP() - INTERVAL 7 DAY
+            GROUP BY company_id
+        """
+        query_job = bq_client.query(query)
+        for row in query_job.result():
+            weights[int(row.company_id)] = float(row.total_duration)
+    except Exception as e:
+        print(f"⚠️  [get_balanced_tasks] No se pudieron obtener pesos históricos: {str(e)[:100]}")
+
+    fallback_weight = sum(weights.values()) / len(weights) if weights else 60.0
+    
+    company_data = []
+    for row in results:
+        cid = int(row.company_id)
+        w = weights.get(cid, fallback_weight)
+        company_data.append({'row': row, 'weight': w})
+
+    company_data.sort(key=lambda x: x['weight'], reverse=True)
+    
+    bins = [[] for _ in range(task_count)]
+    bin_weights = [0.0] * task_count
+    
+    for item in company_data:
+        min_bin_idx = bin_weights.index(min(bin_weights))
+        bins[min_bin_idx].append(item['row'])
+        bin_weights[min_bin_idx] += item['weight']
+    
+    assigned_companies = bins[task_index]
+    assigned_companies.sort(key=lambda x: x.company_id)
+    return assigned_companies
 
 
 def init_vertex_ai(project_id: str, location: str = "us-central1") -> GenerativeModel:
