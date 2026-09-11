@@ -236,7 +236,7 @@ def ensure_silver_call_recordings_table_exists(bq_client: bigquery.Client, targe
         
     ddl = f"""
     CREATE TABLE IF NOT EXISTS `{table_id}` (
-        id INT64 OPTIONS(description="ID propio incremental de la grabación (referencia a bronze.call_recordings.id)"),
+        call_recording_id INT64 OPTIONS(description="ID propio incremental de la grabación (referencia a bronze.call_recordings.id)"),
         lead_call_id INT64 OPTIONS(description="Identificador principal de la llamada en Telecom"),
         call_id INT64 OPTIONS(description="ID de la llamada en la tabla calls de ServiceTitan"),
         
@@ -293,7 +293,7 @@ def flush_silver_records_and_update_bronze(
         rows_to_insert = []
         for r in success_records:
             rows_to_insert.append({
-                "id": r.get("id"),
+                "call_recording_id": r.get("call_recording_id"),
                 "lead_call_id": r["lead_call_id"],
                 "call_id": r.get("call_id"),
                 "transcription": r["transcription"],

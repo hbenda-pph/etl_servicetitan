@@ -180,10 +180,10 @@ def process_company(
         
         # Mapeo flexible de IDs (pre y post script de reparación):
         if "call_id" in r_dict:
-            rec_id = r_dict.get("id")
+            call_recording_id = r_dict.get("id")
             call_id = r_dict.get("call_id")
         else:
-            rec_id = None
+            call_recording_id = None
             call_id = r_dict.get("id")
         
         try:
@@ -191,7 +191,7 @@ def process_company(
             ai_result = process_audio_with_gemini(model, gcs_uri)
             
             record = {
-                "id": rec_id,
+                "call_recording_id": call_recording_id,
                 "lead_call_id": lead_call_id,
                 "call_id": call_id,
                 "transcription": ai_result["transcription"],
