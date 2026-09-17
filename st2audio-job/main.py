@@ -95,6 +95,7 @@ def get_pending_calls(client, project_id, limit=None):
               AND (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
               AND (c.lead_call_recording_url IS NOT NULL AND c.lead_call_recording_url != '')
               AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY c.lead_call_id ORDER BY c.lead_call_received_on DESC) = 1
             ORDER BY c.lead_call_received_on DESC
             {limit_clause}
         """
@@ -112,6 +113,7 @@ def get_pending_calls(client, project_id, limit=None):
             WHERE (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
               AND (c.lead_call_recording_url IS NOT NULL AND c.lead_call_recording_url != '')
               AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY c.lead_call_id ORDER BY c.lead_call_received_on DESC) = 1
             ORDER BY c.lead_call_received_on DESC
             {limit_clause}
         """
@@ -128,7 +130,7 @@ def get_pending_calls(client, project_id, limit=None):
 def save_call_recordings_to_bigquery(bq_client, project_id, records):
     """
     Inserta o actualiza los registros de auditoría en bronze.call_recordings
-    usando una tabla temporal y MERGE para garantizar idempotencia.
+    usando una tabla temporal y MERGE deduplicado para garantizar idempotencia.
     """
     if not records:
         return
@@ -160,10 +162,17 @@ def save_call_recordings_to_bigquery(bq_client, project_id, records):
     load_job = bq_client.load_table_from_json(records, temp_table_id, job_config=job_config)
     load_job.result()
 
-    # 2. Ejecutar MERGE hacia bronze.call_recordings
+    # 2. Ejecutar MERGE hacia bronze.call_recordings con deduplicación en la fuente S
     merge_sql = f"""
     MERGE `{target_table_id}` T
-    USING `{temp_table_id}` S
+    USING (
+      SELECT * EXCEPT(rn)
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY lead_call_id ORDER BY _etl_synced DESC) as rn
+        FROM `{temp_table_id}`
+      )
+      WHERE rn = 1
+    ) S
     ON T.lead_call_id = S.lead_call_id
     WHEN MATCHED THEN UPDATE SET
       id = S.id,
