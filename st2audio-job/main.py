@@ -159,45 +159,49 @@ def save_call_recordings_to_bigquery(bq_client, project_id, records):
         schema=schema,
         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
     )
-    load_job = bq_client.load_table_from_json(records, temp_table_id, job_config=job_config)
-    load_job.result()
+    
+    try:
+        load_job = bq_client.load_table_from_json(records, temp_table_id, job_config=job_config)
+        load_job.result()
 
-    # 2. Ejecutar MERGE hacia bronze.call_recordings con deduplicación en la fuente S
-    merge_sql = f"""
-    MERGE `{target_table_id}` T
-    USING (
-      SELECT * EXCEPT(rn)
-      FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY lead_call_id ORDER BY _etl_synced DESC) as rn
-        FROM `{temp_table_id}`
-      )
-      WHERE rn = 1
-    ) S
-    ON T.lead_call_id = S.lead_call_id
-    WHEN MATCHED THEN UPDATE SET
-      id = S.id,
-      gcs_uri = S.gcs_uri,
-      file_name = S.file_name,
-      file_size_bytes = S.file_size_bytes,
-      content_type = S.content_type,
-      status = S.status,
-      http_status_code = S.http_status_code,
-      error_message = S.error_message,
-      retry_count = COALESCE(T.retry_count, 0) + 1,
-      _etl_synced = S._etl_synced,
-      _etl_operation = 'UPDATE'
-    WHEN NOT MATCHED THEN INSERT (
-      lead_call_id, id, gcs_uri, file_name, file_size_bytes, content_type,
-      status, http_status_code, error_message, retry_count, _etl_synced, _etl_operation
-    ) VALUES (
-      S.lead_call_id, S.id, S.gcs_uri, S.file_name, S.file_size_bytes, S.content_type,
-      S.status, S.http_status_code, S.error_message, 0, S._etl_synced, 'INSERT'
-    );
-    """
-    bq_client.query(merge_sql).result()
+        # 2. Ejecutar MERGE hacia bronze.call_recordings con deduplicación en la fuente S
+        merge_sql = f"""
+        MERGE `{target_table_id}` T
+        USING (
+          SELECT * EXCEPT(rn)
+          FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY lead_call_id ORDER BY _etl_synced DESC) as rn
+            FROM `{temp_table_id}`
+          )
+          WHERE rn = 1
+        ) S
+        ON T.lead_call_id = S.lead_call_id
+        WHEN MATCHED THEN UPDATE SET
+          id = S.id,
+          gcs_uri = S.gcs_uri,
+          file_name = S.file_name,
+          file_size_bytes = S.file_size_bytes,
+          content_type = S.content_type,
+          status = S.status,
+          http_status_code = S.http_status_code,
+          error_message = S.error_message,
+          retry_count = COALESCE(T.retry_count, 0) + 1,
+          _etl_synced = S._etl_synced,
+          _etl_operation = 'UPDATE'
+        WHEN NOT MATCHED THEN INSERT (
+          lead_call_id, id, gcs_uri, file_name, file_size_bytes, content_type,
+          status, http_status_code, error_message, retry_count, _etl_synced, _etl_operation
+        ) VALUES (
+          S.lead_call_id, S.id, S.gcs_uri, S.file_name, S.file_size_bytes, S.content_type,
+          S.status, S.http_status_code, S.error_message, 0, S._etl_synced, 'INSERT'
+        );
+        """
+        bq_client.query(merge_sql).result()
 
-    # 3. Eliminar tabla temporal de staging
-    bq_client.delete_table(temp_table_id, not_found_ok=True)
+    finally:
+        # 3. Eliminar tabla temporal de staging
+        bq_client.delete_table(temp_table_id, not_found_ok=True)
+    
     print(f"  💾 {len(records)} registros sincronizados en `{target_table_id}`", flush=True)
 
 
