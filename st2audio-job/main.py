@@ -93,6 +93,7 @@ def get_pending_calls(client, project_id, limit=None):
                 ON c.lead_call_id = r.lead_call_id
             WHERE (r.lead_call_id IS NULL OR r.status < 0)
               AND (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
+              AND (c.lead_call_recording_url IS NOT NULL AND c.lead_call_recording_url != '')
               AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
             ORDER BY c.lead_call_received_on DESC
             {limit_clause}
@@ -109,6 +110,7 @@ def get_pending_calls(client, project_id, limit=None):
                 c.lead_call_recording_url
             FROM {table_call} c
             WHERE (c.lead_call_duration IS NOT NULL AND c.lead_call_duration != '00:00:00')
+              AND (c.lead_call_recording_url IS NOT NULL AND c.lead_call_recording_url != '')
               AND (c._fivetran_deleted IS FALSE OR c._fivetran_deleted IS NULL)
             ORDER BY c.lead_call_received_on DESC
             {limit_clause}
