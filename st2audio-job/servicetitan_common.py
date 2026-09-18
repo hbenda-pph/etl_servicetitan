@@ -67,11 +67,22 @@ def get_bigquery_project_id():
 
 def get_balanced_tasks(bq_client, results, task_count, task_index):
     """
-    Distribuye las compañías entre las tareas de Cloud Run usando un algoritmo
-    Greedy para balancear la carga basada en métricas históricas de duración.
+    Distribuye las compañías entre las tareas de Cloud Run.
+    - Si task_count >= len(results): Asigna exactamente 1 compañía por tarea (1 a 1).
+    - Si task_count < len(results): Usa algoritmo Greedy balanceado por duración histórica.
     """
     if task_count <= 1:
         return results
+
+    if task_index >= task_count:
+        return []
+
+    # Asignación directa 1 a 1: 1 tarea por compañía (ordenadas por company_id)
+    if task_count >= len(results):
+        sorted_results = sorted(results, key=lambda x: int(x.company_id))
+        if task_index < len(sorted_results):
+            return [sorted_results[task_index]]
+        return []
 
     weights = {}
     try:

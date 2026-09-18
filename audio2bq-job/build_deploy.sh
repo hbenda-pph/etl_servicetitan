@@ -76,11 +76,31 @@ case "$ENVIRONMENT" in
         ;;
 esac
 
+# =============================================================================
+# DETECCIÓN DE COMPAÑÍAS ACTIVAS (1 TASK POR COMPAÑÍA)
+# =============================================================================
+
+BQ_PROJECT_QUERY="${PROJECT_ID}"
+if [ "$ENVIRONMENT" == "pro" ]; then
+    BQ_PROJECT_QUERY="constant-height-455614-i0"
+fi
+
+echo "🔍 Consultando número de compañías activas en BigQuery (${BQ_PROJECT_QUERY}.settings.companies)..."
+COMPANY_COUNT=$(bq query --use_legacy_sql=false --format=csv --quiet \
+    "SELECT COUNT(1) FROM \`${BQ_PROJECT_QUERY}.settings.companies\` WHERE company_fivetran_status = TRUE AND company_project_id IS NOT NULL" 2>/dev/null | tail -n 1)
+
 MEMORY="${RESOURCES_MEMORY[$ENVIRONMENT]}"
 CPU="${RESOURCES_CPU[$ENVIRONMENT]}"
 TASK_TIMEOUT="${RESOURCES_TIMEOUT[$ENVIRONMENT]}"
-PARALLELISM="${RESOURCES_PARALLELISM[$ENVIRONMENT]}"
-TASKS="${RESOURCES_TASKS[$ENVIRONMENT]}"
+
+if [[ "$COMPANY_COUNT" =~ ^[0-9]+$ ]] && [ "$COMPANY_COUNT" -gt 0 ] && [ "$ENVIRONMENT" != "dev" ]; then
+    echo "✅ Se detectaron ${COMPANY_COUNT} compañías activas. Configurando 1 tarea por compañía."
+    TASKS="${COMPANY_COUNT}"
+    PARALLELISM="${COMPANY_COUNT}"
+else
+    TASKS="${RESOURCES_TASKS[$ENVIRONMENT]}"
+    PARALLELISM="${RESOURCES_PARALLELISM[$ENVIRONMENT]}"
+fi
 
 REGION="us-east1"
 IMAGE_NAME="etl-audio2bq"
@@ -101,6 +121,11 @@ echo "📋 SA         : ${SERVICE_ACCOUNT}"
 echo "📋 Memoria    : ${MEMORY}"
 echo "📋 CPU        : ${CPU}"
 echo "📋 Timeout    : ${TASK_TIMEOUT}s"
+if [ "$TASKS" != "1" ]; then
+    echo "📋 Paralelismo: ${PARALLELISM} simultáneas / ${TASKS} tareas totales (1 tarea por compañía)"
+else
+    echo "📋 Paralelismo: Sin paralelismo (1 tarea)"
+fi
 echo "📋 ETL_MODE   : ${ETL_MODE}"
 echo ""
 

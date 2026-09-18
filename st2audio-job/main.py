@@ -450,7 +450,7 @@ def run_all(args):
     is_parallel = task_count > 1
 
     print(f"🔍 Proyecto detectado: {PROJECT_SOURCE} | Project ID queries: {PROJECT_ALL}")
-    client = bigquery.Client()
+    client = bigquery.Client(project=PROJECT_ALL)
     results = fetch_active_companies(client, PROJECT_ALL, args.company_id)
     total = len(results)
 

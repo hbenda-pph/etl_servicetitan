@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# SCRIPT DE BUILD & DEPLOY PARA ETL-ST2JSON-JOB (Cloud Run Job)
+# SCRIPT DE BUILD & DEPLOY PARA ETL-ST2AUDIO-JOB (Cloud Run Job)
 # Multi-Environment: DEV, QUA, PRO
 # Modo ETL: ALL (consorcio — pph-central)
 # =============================================================================
@@ -69,32 +69,52 @@ case "$ENVIRONMENT" in
     dev)
         PROJECT_ID="platform-partners-des"
         PROJECT_NAME="platform-partners-des"
-        JOB_NAME="etl-st2json-job-dev"
+        JOB_NAME="etl-st2audio-job-dev"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-des.iam.gserviceaccount.com"
         ;;
     qua)
         PROJECT_ID="platform-partners-qua"
         PROJECT_NAME="platform-partners-qua"
-        JOB_NAME="etl-st2json-job-qua"
+        JOB_NAME="etl-st2audio-job-qua"
         SERVICE_ACCOUNT="etl-servicetitan@platform-partners-qua.iam.gserviceaccount.com"
         ;;
     pro)
         PROJECT_ID="constant-height-455614-i0"
         PROJECT_NAME="platform-partners-pro"
-        JOB_NAME="etl-st2json-job"
+        JOB_NAME="etl-st2audio-job"
         SERVICE_ACCOUNT="etl-servicetitan@${PROJECT_ID}.iam.gserviceaccount.com"
         ;;
 esac
+
+# =============================================================================
+# DETECCIÓN DE COMPAÑÍAS ACTIVAS (1 TASK POR COMPAÑÍA)
+# =============================================================================
+
+BQ_PROJECT_QUERY="${PROJECT_ID}"
+if [ "$ENVIRONMENT" == "pro" ]; then
+    BQ_PROJECT_QUERY="constant-height-455614-i0"
+fi
+
+echo "🔍 Consultando número de compañías activas en BigQuery (${BQ_PROJECT_QUERY}.settings.companies)..."
+COMPANY_COUNT=$(bq query --use_legacy_sql=false --format=csv --quiet \
+    "SELECT COUNT(1) FROM \`${BQ_PROJECT_QUERY}.settings.companies\` WHERE company_fivetran_status = TRUE AND company_project_id IS NOT NULL" 2>/dev/null | tail -n 1)
 
 # Leer recursos del array según ambiente
 MEMORY="${RESOURCES_MEMORY[$ENVIRONMENT]}"
 CPU="${RESOURCES_CPU[$ENVIRONMENT]}"
 TASK_TIMEOUT="${RESOURCES_TIMEOUT[$ENVIRONMENT]}"
-PARALLELISM="${RESOURCES_PARALLELISM[$ENVIRONMENT]}"
-TASKS="${RESOURCES_TASKS[$ENVIRONMENT]}"
+
+if [[ "$COMPANY_COUNT" =~ ^[0-9]+$ ]] && [ "$COMPANY_COUNT" -gt 0 ] && [ "$ENVIRONMENT" != "dev" ]; then
+    echo "✅ Se detectaron ${COMPANY_COUNT} compañías activas. Configurando 1 tarea por compañía."
+    TASKS="${COMPANY_COUNT}"
+    PARALLELISM="${COMPANY_COUNT}"
+else
+    TASKS="${RESOURCES_TASKS[$ENVIRONMENT]}"
+    PARALLELISM="${RESOURCES_PARALLELISM[$ENVIRONMENT]}"
+fi
 
 REGION="us-east1"
-IMAGE_NAME="etl-st2json"
+IMAGE_NAME="etl-st2audio"
 IMAGE_TAG="gcr.io/${PROJECT_ID}/${IMAGE_NAME}"
 MAX_RETRIES="1"
 ETL_MODE="all"
@@ -104,7 +124,7 @@ ETL_MODE="all"
 # =============================================================================
 
 echo ""
-echo "🚀 Build & Deploy — ETL-ST2JSON-JOB (Modo: ${ETL_MODE^^})"
+echo "🚀 Build & Deploy — ETL-ST2AUDIO-JOB (Modo: ${ETL_MODE^^})"
 echo "==========================================================="
 echo "🌍 AMBIENTE   : ${ENVIRONMENT^^}"
 echo "📋 Proyecto ID: ${PROJECT_ID}"
@@ -117,7 +137,7 @@ echo "📋 Memoria    : ${MEMORY}"
 echo "📋 CPU        : ${CPU}"
 echo "📋 Timeout    : ${TASK_TIMEOUT}s ($(( TASK_TIMEOUT / 3600 )) hora(s))"
 if [ "$TASKS" != "1" ]; then
-    echo "📋 Paralelismo: ${PARALLELISM} simultáneas / ${TASKS} tareas totales"
+    echo "📋 Paralelismo: ${PARALLELISM} simultáneas / ${TASKS} tareas totales (1 tarea por compañía)"
 else
     echo "📋 Paralelismo: Sin paralelismo (1 tarea)"
 fi
@@ -130,7 +150,7 @@ echo ""
 
 if [ ! -f "main.py" ]; then
     echo "❌ Error: main.py no encontrado."
-    echo "   Ejecuta este script desde el directorio st2json-job/"
+    echo "   Ejecuta este script desde el directorio st2audio-job/"
     exit 1
 fi
 
