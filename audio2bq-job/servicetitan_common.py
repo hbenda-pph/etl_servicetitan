@@ -172,11 +172,32 @@ Output ONLY valid JSON. Do not include markdown code fence formatting like ```js
 """
 
 
-def process_audio_with_gemini(model: GenerativeModel, gcs_uri: str) -> Dict[str, Any]:
+def download_gcs_bytes(storage_client: storage.Client, gcs_uri: str) -> bytes:
     """
-    Envía el audio desde GCS a Gemini 2.5 Flash y obtiene la transcripción + features para ML.
+    Descarga los bytes de un archivo en GCS dado su URI gs://bucket_name/blob_name.
     """
-    audio_part = Part.from_uri(uri=gcs_uri, mime_type="audio/mpeg")
+    path = gcs_uri.replace("gs://", "", 1)
+    bucket_name, blob_name = path.split("/", 1)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    return blob.download_as_bytes()
+
+
+def process_audio_with_gemini(
+    model: GenerativeModel,
+    gcs_uri: str,
+    storage_client: Optional[storage.Client] = None
+) -> Dict[str, Any]:
+    """
+    Envía el audio a Gemini 2.5 Flash y obtiene la transcripción + features para ML.
+    Si se pasa storage_client, descarga los bytes directamente para evitar problemas
+    de permisos cross-project entre Vertex AI (pph-ia) y el bucket de la compañía.
+    """
+    if storage_client:
+        audio_bytes = download_gcs_bytes(storage_client, gcs_uri)
+        audio_part = Part.from_data(data=audio_bytes, mime_type="audio/mpeg")
+    else:
+        audio_part = Part.from_uri(uri=gcs_uri, mime_type="audio/mpeg")
     
     config = GenerationConfig(
         response_mime_type="application/json",

@@ -21,7 +21,7 @@ import sys
 import time
 import argparse
 from datetime import datetime, timezone
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 
 # Garantizar compatibilidad de encoding en Windows console (emojis / unicode)
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -134,9 +134,11 @@ def process_company(
         
     # 2. Inicializar modelo Vertex AI en el proyecto dedicado de IA (pph-ia)
     model = None
+    storage_client = None
     if not dry_run:
         print(f"🤖 Inicializando Vertex AI Gemini 2.5 Flash en {PROJECT_VERTEX_AI} ({location})...", flush=True)
         model = init_vertex_ai(project_id=PROJECT_VERTEX_AI, location=location)
+        storage_client = storage.Client(project=target_project)
         
     # 3. Consultar registros candidatos en bronze.call_recordings (status = 0)
     limit_clause = f"LIMIT {limit}" if limit else ""
@@ -190,8 +192,8 @@ def process_company(
             call_id = r_dict.get("id")
         
         try:
-            # Procesar con Vertex AI Gemini 2.5 Flash
-            ai_result = process_audio_with_gemini(model, gcs_uri)
+            # Procesar con Vertex AI Gemini 2.5 Flash (descargando bytes con storage_client)
+            ai_result = process_audio_with_gemini(model, gcs_uri, storage_client=storage_client)
             
             record = {
                 "call_recording_id": call_recording_id,
