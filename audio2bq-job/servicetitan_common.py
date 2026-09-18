@@ -128,9 +128,10 @@ def get_balanced_tasks(bq_client, results, task_count, task_index):
     return assigned_companies
 
 
-def init_vertex_ai(project_id: str, location: str = "us-central1") -> GenerativeModel:
+def init_vertex_ai(project_id: str = "pph-ia", location: str = "us-central1") -> GenerativeModel:
     """
-    Inicializa el cliente de Vertex AI y retorna el modelo GenerativeModel configurado.
+    Inicializa el cliente de Vertex AI en el proyecto dedicado de IA (pph-ia)
+    y retorna el modelo GenerativeModel configurado.
     """
     vertexai.init(project=project_id, location=location)
     

@@ -50,6 +50,9 @@ PROJECT_SOURCE = get_project_source()
 # Proyecto INBOX: siempre fijo, es su propio proyecto GCP
 PROJECT_INBOX = "pph-inbox"
 
+# Proyecto exclusivo para Vertex AI / Gemini 2.5 Flash
+PROJECT_VERTEX_AI = os.environ.get("VERTEX_AI_PROJECT", "pph-ia")
+
 # Tablas maestras (iguales para ambos modos)
 DATASET_COMPANIES = "settings"
 TABLE_COMPANIES = "companies"
@@ -109,14 +112,14 @@ def process_company(
 ):
     """
     Procesa todos los audios pendientes (bronze.call_recordings status=0) de una compañía:
-    llama a Vertex AI Gemini 2.5 Flash, inserta en silver.tb_call_recordings y actualiza status en bronze.
+    llama a Vertex AI Gemini 2.5 Flash (en pph-ia), inserta en silver.tb_call_recordings y actualiza status en bronze.
     """
     company_id = row.company_id
     company_name = row.company_name
     target_project = row.company_project_id
     
     print(f"\n" + "=" * 80, flush=True)
-    print(f"🏢 Procesando Empresa #{company_id}: {company_name} | Proyecto: {target_project}", flush=True)
+    print(f"🏢 Procesando Empresa #{company_id}: {company_name} | Destino: {target_project} | Proyecto Vertex AI: {PROJECT_VERTEX_AI}", flush=True)
     if dry_run:
         print("🔍 MODO DRY-RUN: Solo mostrando registros, sin llamar a Vertex AI ni BigQuery.", flush=True)
     print("=" * 80, flush=True)
@@ -129,11 +132,11 @@ def process_company(
     if not dry_run:
         ensure_silver_call_recordings_table_exists(bq_client, target_project)
         
-    # 2. Inicializar modelo Vertex AI apuntando al proyecto donde vive el bucket de audio
+    # 2. Inicializar modelo Vertex AI en el proyecto dedicado de IA (pph-ia)
     model = None
     if not dry_run:
-        print(f"🤖 Inicializando Vertex AI Gemini 2.5 Flash en {target_project} ({location})...", flush=True)
-        model = init_vertex_ai(project_id=target_project, location=location)
+        print(f"🤖 Inicializando Vertex AI Gemini 2.5 Flash en {PROJECT_VERTEX_AI} ({location})...", flush=True)
+        model = init_vertex_ai(project_id=PROJECT_VERTEX_AI, location=location)
         
     # 3. Consultar registros candidatos en bronze.call_recordings (status = 0)
     limit_clause = f"LIMIT {limit}" if limit else ""
