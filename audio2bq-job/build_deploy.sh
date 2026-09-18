@@ -21,8 +21,8 @@ set -e
 declare -A RESOURCES_MEMORY=(      [dev]="4Gi"   [qua]="4Gi"   [pro]="8Gi"   )
 declare -A RESOURCES_CPU=(         [dev]="2"      [qua]="2"      [pro]="4"     )
 declare -A RESOURCES_TIMEOUT=(     [dev]="3600"   [qua]="3600"   [pro]="3600"  )
-declare -A RESOURCES_PARALLELISM=( [dev]="1"      [qua]="1"      [pro]="2"     )
-declare -A RESOURCES_TASKS=(       [dev]="1"      [qua]="1"      [pro]="2"     )
+declare -A RESOURCES_PARALLELISM=( [dev]="20"     [qua]="20"     [pro]="20"    )
+declare -A RESOURCES_TASKS=(       [dev]="20"     [qua]="20"     [pro]="20"    )
 
 # =============================================================================
 # DETECCIÓN / VALIDACIÓN DE AMBIENTE
@@ -93,8 +93,8 @@ MEMORY="${RESOURCES_MEMORY[$ENVIRONMENT]}"
 CPU="${RESOURCES_CPU[$ENVIRONMENT]}"
 TASK_TIMEOUT="${RESOURCES_TIMEOUT[$ENVIRONMENT]}"
 
-if [[ "$COMPANY_COUNT" =~ ^[0-9]+$ ]] && [ "$COMPANY_COUNT" -gt 0 ] && [ "$ENVIRONMENT" != "dev" ]; then
-    echo "✅ Se detectaron ${COMPANY_COUNT} compañías activas. Configurando 1 tarea por compañía."
+if [[ "$COMPANY_COUNT" =~ ^[0-9]+$ ]] && [ "$COMPANY_COUNT" -gt 0 ]; then
+    echo "✅ Se detectaron ${COMPANY_COUNT} compañías activas. Configurando 1 tarea por compañía (${COMPANY_COUNT} tareas en paralelo)."
     TASKS="${COMPANY_COUNT}"
     PARALLELISM="${COMPANY_COUNT}"
 else
